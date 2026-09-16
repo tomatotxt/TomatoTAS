@@ -3,13 +3,15 @@ local factory=require("../src/runtime/Map")
 local Scope=require("../src/core/Scope")(function() end,{})
 local elapsed,yields=0,0
 local heartbeat={Wait=function() elapsed+=0.1; yields+=1 end}
-local storage={FindFirstChild=function() return nil end}
+local remote
+local storage={FindFirstChild=function(_,name) return if name=="Remote" then remote else nil end}
 local root={CFrame={}}
 local player={Character={HumanoidRootPart=root,FindFirstChild=function(_,name) return if name=="HumanoidRootPart" then root else nil end}}
 local services={RunService={Heartbeat=heartbeat},Players={LocalPlayer=player},ReplicatedStorage=storage,
     HttpService={GenerateGUID=function() return "test-guid" end}}
 local environment=setmetatable({game={GetService=function(_,name) return services[name] end},workspace={},
     os={clock=function() return elapsed end},getconnections=function(signal) return {signal} end,
+    warn=function() end,
 },{__index=getfenv()})
 setfenv(factory,environment)
 local Map=factory(function(name) assert(name=="core/Scope"); return Scope end,{Timeout=10,BatchSize=2})
@@ -26,6 +28,7 @@ local function object(name)
     state.IsA=function() return false end
     state.Destroy=function() state.Parent=nil; state.destroyed=true end
     local instance=setmetatable({},{__index=state,__newindex=function(_,key,value)
+        if state.beforeWrite then state.beforeWrite(key,value) end
         if key=="Archivable" and value~=state.Archivable then
             assert(not connection.Enabled,"Archivable trap fired")
         end
@@ -37,20 +40,27 @@ local function prepared()
     elapsed,yields=0,0
     local map=Map.new()
     local live=object("Map")
-    for i=1,5 do table.insert(live.descendants,object("Part"..i)) end
+    for i=1,5 do
+        local part=object("Part"..i)
+        part.Parent=live
+        table.insert(live.descendants,part)
+    end
     map.live=live; map.spawn=live.descendants[1]
     map.spawn.CFrame={ToObjectSpace=function() return {} end}
     map.Settle=function() end
     live.Clone=function()
         assert(live.Archivable)
         local clone=object("Clone")
+        clone.Parent=nil
         for _,part in ipairs(live.descendants) do
             assert(part.Archivable and not part.connection.Enabled)
             local copy=object(part.Name)
+            copy.Parent=clone
             copy.attributes=table.clone(part.attributes)
             copy.CFrame={}
             table.insert(clone.descendants,copy)
         end
+        live.lastClone=clone
         return clone
     end
     return map,live
@@ -130,5 +140,120 @@ test("subthreshold drift cannot falsely settle",function()
     heartbeat.Wait=originalWait
     assert(not ok and elapsed>=10)
     map:Destroy()
+end)
+test("equal-size hierarchy replacement is rejected before cloning",function()
+    local map,live=prepared()
+    local originalWait=heartbeat.Wait
+    local old=live.descendants[5]
+    heartbeat.Wait=function()
+        originalWait()
+        if yields==1 then
+            local replacement=object("replacement"); replacement.Parent=live
+            live.descendants[5]=replacement
+        end
+    end
+    local ok=pcall(function() map:Clone() end)
+    heartbeat.Wait=originalWait
+    assert(not ok and not live.lastClone and live.Parent==true and not map.clone)
+    restored(live)
+    assert(not old.Archivable and old.connection.Enabled)
+    map:Destroy()
+end)
+test("failed sandbox parenting restores live map and destroys clone",function()
+    local map,live=prepared()
+    local cloneMethod=live.Clone
+    live.Clone=function()
+        local clone=cloneMethod()
+        clone.beforeWrite=function(key,value)
+            if key=="Parent" and value==environment.workspace then error("sandbox parent blocked") end
+        end
+        return clone
+    end
+    assert(not pcall(function() map:Clone() end))
+    restored(live)
+    assert(live.Parent==true and live.lastClone.destroyed and not map.clone)
+    map:Destroy()
+end)
+test("failed live parenting destroys uncommitted clone",function()
+    local map,live=prepared()
+    live.beforeWrite=function(key,value)
+        if key=="Parent" and value==storage then error("live parent blocked") end
+    end
+    assert(not pcall(function() map:Clone() end))
+    restored(live)
+    assert(live.Parent==true and live.lastClone.destroyed and not map.clone)
+    map:Destroy()
+end)
+test("failure after listener disabling re-enables it",function()
+    local map,live=prepared()
+    local connection=live.descendants[1].connection
+    connection.Disable=function(self) self.Enabled=false; error("partial disable failed") end
+    assert(not pcall(function() map:Clone() end))
+    restored(live)
+    assert(connection.enables==1 and not map.clone)
+    map:Destroy()
+end)
+test("already disabled listeners stay disabled",function()
+    local map,live=prepared()
+    local connection=live.descendants[1].connection
+    connection.Enabled=false
+    map:Clone()
+    assert(not connection.Enabled and connection.disables==0 and connection.enables==0)
+    map:Destroy()
+end)
+test("spawn removal on the final settle heartbeat rejects",function()
+    elapsed,yields=0,0
+    local map=Map.new()
+    local spawn={Parent=true,CFrame=pose(0)}
+    local originalWait=heartbeat.Wait
+    heartbeat.Wait=function() originalWait(); if elapsed>=1 then spawn.Parent=nil end end
+    local ok=pcall(function() map:Settle(spawn) end)
+    heartbeat.Wait=originalWait
+    assert(not ok)
+    map:Destroy()
+end)
+test("a later round cannot overwrite sandbox rope data",function()
+    local listener
+    local event={Connect=function(_,fn)
+        listener=fn
+        return {Destroy=function() listener=nil end,Disconnect=function() listener=nil end}
+    end}
+    remote={FindFirstChild=function(_,name) return if name=="UpdRopeData" then {OnClientEvent=event} else nil end}
+    local map=Map.new()
+    remote=nil
+    local originalSource,newSource={},{}
+    local current=originalSource
+    environment.workspace.FindFirstChild=function(_,name)
+        if name=="Multiplayer" then return {FindFirstChild=function(_,child) return if child=="Map" then current else nil end} end
+        return nil
+    end
+    map.live=originalSource
+    local originalRopes,newRopes={{positions={1}}},{{positions={2}}}
+    listener(originalRopes)
+    assert(map.ropes==originalRopes)
+    map.clone={Destroy=function() end}
+    current=newSource
+    listener(newRopes)
+    assert(map.ropes==originalRopes and map.ropeCache[newSource]==newRopes)
+    map:Destroy()
+    environment.workspace.FindFirstChild=nil
+    assert(not listener)
+end)
+test("zipline restore waits for a ready environment and avoids duplicate writes",function()
+    local map=Map.new()
+    local originalCharacter=player.Character
+    local scriptObject={}
+    local character={FindFirstChild=function(_,name) return if name=="FE2_Character" then scriptObject else nil end}
+    player.Character=character
+    elapsed,yields=0,0
+    local fn=function() end
+    local value,writes=nil,0
+    map.ropes={{positions={1}}}
+    environment.getsenv=function() return if yields>=2 then {startZipline=fn} else {} end
+    environment.getupvalue=function() return value end
+    environment.setupvalue=function(_,index,nextValue) assert(index==2); value=nextValue; writes+=1 end
+    assert(map:RestoreRopes(character) and yields>=2 and value==map.ropes)
+    assert(map:RestoreRopes(character,true) and writes==1)
+    map:Destroy(); player.Character=originalCharacter
 end)
 print("Map tests passed: "..count)

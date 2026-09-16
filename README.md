@@ -4,7 +4,8 @@ Modular, headless Flood Escape 2 character TAS Creator and Player for an executo
 providing UNC/sUNC APIs. This is a new implementation; the files in `references/`
 are research inputs, not runtime dependencies.
 
-**Status:** implemented and locally tested core/controller; FE2 integration still
+**Status:** implemented and locally tested core, loader, controller, storage and
+mocked character/map integrations; FE2 integration still
 requires in-game testing. Full map simulation and world savestates are deliberately
 deferred. Character marks do not rewind buttons, fluids, platforms, server timers,
 or hidden game-script variables. No autofarm is included.
@@ -33,6 +34,7 @@ loadstring(game:HttpGet(
 
 The importer snapshots configuration, caches modules per launch, rejects circular
 dependencies and invalid/missing source, and includes module paths in errors.
+It validates capabilities and keybind settings before unloading an existing session.
 Rerun the loader to fetch updates. For reproducible runs, `Branch` can instead be a
 commit SHA. A moving branch can change between HTTP requests; a SHA avoids mixing
 revisions. GitHub publication is not performed by this local build.
@@ -80,8 +82,28 @@ map name and spawn path must match the run.
 | End | Unload and clean up |
 
 Hotkeys are ignored while typing. During map operations, F9 cancels and End unloads;
-other hotkeys wait until the operation finishes. Console
+other hotkeys are ignored until the operation finishes. Console
 messages report errors and status; no UI libraries or ScreenGuis are used.
+Unavailable actions display guidance without changing character control. A failed
+save or load also leaves an ongoing recording or playback active.
+
+Override keys in `TomatoTASConfig` before loading. Use Roblox KeyCode names as strings,
+or `false` to disable a binding. Unknown actions, invalid keys and duplicates are
+rejected before the tool starts:
+
+```lua
+getgenv().TomatoTASConfig.Keybinds = {
+    Record = "R",
+    Stop = "X",
+    NextBranch = "B",
+    Save = false,
+}
+```
+
+Action names: `Prepare`, `Record`, `Play`, `Mark`, `Restore`, `Save`, `Load`, `Clone`,
+`Stop`, `Step`, `PreviousFrame`, `NextFrame`, `NextBranch`, `Unload`. Table entries
+not supplied retain the default bindings above. Guidance text uses the default
+key names; use your configured equivalent when remapping.
 
 ## Script API
 
@@ -96,8 +118,11 @@ tas:Seek(120)                 -- global tree node ID, not branch-relative index
 tas:Play(240, "frames")       -- exact samples, one stored frame per simulation callback
 tas:Play(240, "time")         -- interpolate by recorded relative simulation time
 tas:SetSpeed(0.5)             -- time playback only; does not slow Roblox physics
+tas:SetCamera(false)          -- release camera takeover immediately
 tas:Save("practice")
 tas:Load("practice")
+tas:Load("practice", "backup") -- explicitly recover the previous verified save
+tas:Load("practice", "pending") -- inspect a completed staged save after an IO failure
 print(tas:Status())
 print(tas:ListFiles())
 tas:Stop()
@@ -106,8 +131,18 @@ tas:Destroy()
 
 For yielding commands, use `tas:Command(function() tas:Prepare() end)` or the hotkeys
 to serialize user actions. The API is intended for sequential use, not concurrent
-calls from multiple scripts. `tas.camera = false` before playback disables camera
-takeover. `tas:RestoreWorld()` explicitly errors until world simulation exists.
+calls from multiple scripts. `tas:Dispatch("Record")` uses the same precondition
+checks as the hotkey; `tas:Cancel()` also cancels a pending map operation.
+`tas:RestoreWorld()` explicitly errors until world simulation exists.
+
+Recovery loads do not overwrite the primary file. Saves stage and verify the new
+bytes, verify a backup of the old valid file, and then write the primary. If the
+last write fails, the tool attempts to restore the old primary and retains the
+`.pending` file. A corrupt primary does not overwrite an older backup. Executor
+filesystem APIs do not provide a portable atomic rename; a process crash can
+still require explicit recovery.
+Validating an older save retains only parent timestamps instead of constructing a
+second full frame history, reducing peak memory during backup checks.
 
 ## Modules
 
@@ -130,6 +165,8 @@ takeover. `tas:RestoreWorld()` explicitly errors until world simulation exists.
 Recording samples `PostSimulation`, using accumulated simulation deltas as the
 relative timeline. It records actual completed frames rather than inventing 60 Hz
 samples when the client runs slower. Frame zero is captured when recording starts.
+Single-frame advance waits for the next `PreSimulation` boundary before releasing
+the held character, then captures exactly one completed simulation callback.
 Playback applies character state on `PreSimulation`; camera playback uses
 `RenderStepped`. These phases follow the [Roblox scheduler documentation](https://create.roblox.com/docs/reference/engine/classes/RunService).
 
@@ -148,9 +185,17 @@ rate. Neither mode can guarantee server-side outcomes or exact touch-event timin
 Puppet mode anchors the root so physics cannot integrate it beyond the recorded
 sample. Character controller and animation scripts are temporarily disabled;
 captured animation tracks are directly positioned. A scoped MoveDirection override
-returns normalized target velocity. Stopping restores script states, geometry,
+returns normalized horizontal target velocity. Stopping restores script states, geometry,
 camera and movement settings. The shared metamethod hook remains installed but
 inactive, avoiding unsafe removal of hooks belonging to other tools.
+
+Animation capture has a stable ordering; playback matches asset IDs and occurrence
+counts across samples. A missing or inaccessible animation warns once per takeover
+and does not abort position playback. Late-created hitboxes, animators and mechanic
+events are refreshed. Camera replacement and failed restoration of a stale object
+do not prevent the remaining cleanup. Format v1 lacks animation length and a unique
+track-instance identifier, so loop wraps and indistinguishable same-ID tracks still
+have interpolation limits.
 
 Continuing from a character mark restores recorded pose, velocity, geometry and
 public humanoid state, but restarting FE2's controller does not reconstruct its
@@ -164,6 +209,10 @@ Preparation disables Archivable listeners before changing Archivable, processes
 a dense array in batches, and restores original properties/listeners afterward.
 It refuses listeners that cannot be reversibly disabled. Cloning itself is a
 synchronous Roblox operation and can still briefly stall on a large map.
+Preparation checks instance identity and parent relationships, so replacing parts
+without changing the descendant count is detected. Failed placement of either map
+rolls back the placement and disposes of the unfinished clone. Zipline packets are
+associated with map instances; a later round cannot replace a sandbox's rope cache.
 
 The sandbox preserves world coordinates for zipline nodes. The live map is moved
 locally to ReplicatedStorage while the clone occupies its position; unloading
@@ -178,18 +227,24 @@ on a run. No server scripts are copied or simulated.
 With the official [Luau CLI tools](https://github.com/luau-lang/luau/releases) on PATH:
 
 ```powershell
-luau tests/core.luau
-luau tests/controller.luau
-luau tests/map.luau
-Get-ChildItem src -Recurse -Filter *.luau | ForEach-Object { luau-compile --null $_.FullName }
-luau-compile --null loader.luau
+.\scripts\check.ps1
+# Or point to the folder containing luau.exe and luau-compile.exe:
+.\scripts\check.ps1 -ToolsDirectory 'C:\path\to\luau-tools'
 ```
+
+The script compiles all production/test files, statically analyzes the pure core,
+and runs every suite in `tests/`.
+It passes the actual loader source into the loader tests as a program argument;
+those tests neither download modules nor duplicate the loader implementation.
 
 Core tests cover rotation conversion, interpolation, branching, timestamps,
 binary roundtrips, corruption/truncation, and a 10,000-node history. Controller
 tests use service doubles to cover recording, character marks, stepping, playback,
 new runs, failure handling and unload. Clone tests check batching, cancellation,
-and restoration of source properties/listeners after success and failure.
-They do not validate Roblox engine behavior
+and restoration of source properties/listeners after success and failure. Character
+tests cover takeover ownership, animation reuse/failure, delayed instances, cameras
+and best-effort cleanup. Storage tests inject failures at each save stage and check
+recovery. Loader tests use HTTP fixtures to check configuration, caching, failures
+and session preservation. They do not validate Roblox engine behavior
 or executor compatibility. See `docs/VALIDATION.md` for the in-game acceptance plan
 and `docs/FORMAT.md` for the file schema.

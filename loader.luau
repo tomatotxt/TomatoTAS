@@ -1,22 +1,28 @@
 -- Configure getgenv().TomatoTASConfig before executing this file.
 local env = getgenv()
 local supplied = env.TomatoTASConfig or {}
+assert(type(supplied)=="table", "[TomatoTAS] TomatoTASConfig must be a table")
 local config = table.clone(supplied)
 config.Owner = config.Owner or "tomatotxt"
 config.Repo = config.Repo or "TomatoTAS"
 config.Branch = config.Branch or "live"
 assert(type(config.Repo) == "string" and config.Repo ~= "" and config.Repo ~= "TBD",
     "[TomatoTAS] Set getgenv().TomatoTASConfig.Repo to your GitHub repository name")
-for _, key in ipairs({"Owner", "Repo", "Branch"}) do
-    assert(type(config[key]) == "string" and config[key]:match("^[%w_.%-/]+$")
-        and not config[key]:find("..", 1, true), "Invalid GitHub " .. key)
-end
+assert(type(config.Owner)=="string" and config.Owner:match("^[%w%-]+$"),"Invalid GitHub Owner")
+assert(config.Repo:match("^[%w_.%-]+$") and config.Repo~="." and config.Repo~="..", "Invalid GitHub Repo")
+assert(type(config.Branch)=="string" and config.Branch:match("^[%w_.%-/]+$")
+    and not config.Branch:find("..",1,true) and not config.Branch:find("//",1,true)
+    and config.Branch:sub(1,1)~="/" and config.Branch:sub(-1)~="/", "Invalid GitHub Branch")
 config.Directory = config.Directory or "TomatoTAS"
 config.Timeout = config.Timeout or 45
 config.BatchSize = config.BatchSize or 100
 config.MaxNodes = config.MaxNodes or 1000000
 config.MaxFileBytes = config.MaxFileBytes or 268435456
 config.File = config.File or "run"
+assert(type(config.Directory)=="string" and config.Directory:match("^[%w_%-]+$"),
+    "Directory must be a simple relative folder name")
+assert(type(config.File)=="string" and #config.File>0 and #config.File<=100 and config.File:match("^[%w_%-]+$"),
+    "File must be a simple run name without an extension")
 for _, key in ipairs({"Timeout", "BatchSize", "MaxNodes", "MaxFileBytes"}) do
     assert(type(config[key]) == "number" and config[key] > 0 and config[key] < math.huge,
         "Invalid numeric setting: " .. key)
@@ -47,6 +53,8 @@ local function import(name)
     return result
 end
 local App = import("App")
+-- Validate configuration/capabilities before unloading an already running session.
+App.Validate()
 if env.TomatoTAS then env.TomatoTAS:Destroy() end
 local app = App.new()
 env.TomatoTAS = app

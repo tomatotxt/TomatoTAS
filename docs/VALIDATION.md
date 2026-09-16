@@ -12,10 +12,26 @@
   switching maps for a new run, unload, and runtime error cleanup.
 - Clone preparation with mock Instances: dense batching, successful cleanup,
   failed clone cleanup, cancellation, rejection of unrestorable listeners,
-  full quiet-interval spawn settling, and rejection of accumulating slow drift.
+  full quiet-interval spawn settling, rejection of accumulating slow drift,
+  same-count part replacement, failed map parenting, delayed closure readiness,
+  and rope cache isolation across rounds.
+- Character mocks: deterministic track ordering/reuse, late hitboxes/events,
+  camera replacement, inaccessible animations, takeover ownership, and isolated
+  cleanup when individual objects fail.
+- File IO fault injection: staging, backup and final-write verification, rollback,
+  explicit recovery loads, primary corruption, and failed temporary-file deletion.
+- Loader tests execute the real loader source with mocked HTTP: default/custom
+  URLs, module caching, bad responses, dependency cycles, rejected configuration,
+  and preserving a previous session when validation fails.
 
-Current local result: **14 Luau files compile; 26 tests pass** (10 core,
-10 controller, 6 map). Pure core modules also pass standalone Luau analysis.
+Current local result: **17 Luau files compile; 90 tests pass** (25 core,
+24 controller, 14 map, 10 character, 10 storage, 7 loader).
+Controller coverage includes empty/single-branch hotkeys, branch cycling,
+custom keybind validation, preserving recording after failed file operations,
+map removal, cancellation and waiting for a fresh physics boundary when stepping.
+Pure core modules also pass standalone Luau analysis.
+The test runner now includes that analysis. Backup validation checks the same
+binary invariants without allocating a second full recording tree.
 Standalone analysis of Roblox/executor modules requires host API definitions;
 compilation and mocked tests do not substitute for those definitions.
 
@@ -24,7 +40,7 @@ compilation and mocked tests do not substitute for those definitions.
 Run these checks using the intended executor after publishing the repository:
 
 1. Start the loader in the lobby, during NewMap arrival, and after Map is loaded.
-   Check missing Repo, failed HTTP and incompatible capabilities produce clear errors.
+   Check invalid Repo, failed HTTP and incompatible capabilities produce clear errors.
 2. On a static spawn, verify preparation takes at least one second after entry.
    On a moving spawn, verify the stable timer restarts after movement or rotation.
    Remove the map or respawn mid-preparation: verify timeout/cancellation releases work.
