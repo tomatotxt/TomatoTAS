@@ -231,12 +231,24 @@ test("checksum-valid malformed frame fields reject",function()
         {node.root,math.huge},{node.root+48,0},{node.geometry,0},{node.geometry+8,-1},
         {node.humanoid,1.5},{node.humanoid+8,-1},{node.humanoid+16,-1},{node.humanoid+24,-1},
         {node.humanoid+32,2},{node.humanoid+40,0.5},{node.humanoid+48,-1},{node.flags,2},
-        {node.tracks[1].time,-1},{node.tracks[1].weight,1.1},{node.tracks[1].priority,0.5},
+        {node.tracks[1].time,-1},{node.tracks[1].weight,-0.1},{node.tracks[1].priority,0.5},
         {node.tracks[1].looped,2},
     }
     for _,field in ipairs(invalidFields) do
         fails(function() Codec.decode(rewrite(bytes,function(b) buffer.writef64(b,field[1],field[2]) end)) end)
     end
+end)
+
+test("animation weights above one survive save, load and sampling",function()
+    local t=tree()
+    t.nodes[1].frame.tracks[1].weight=3
+    t.nodes[2].frame.tracks[1].weight=5
+    local bytes=Codec.encode(t)
+    assert(Codec.validate(bytes))
+    local decoded=Codec.decode(bytes)
+    assert(decoded.nodes[1].frame.tracks[1].weight==3)
+    assert(decoded.nodes[2].frame.tracks[1].weight==5)
+    near(Sampling.at(decoded,decoded:Path(),0.05).tracks[1].weight,4)
 end)
 
 test("checksum-valid invalid marks and trailing payload reject",function()

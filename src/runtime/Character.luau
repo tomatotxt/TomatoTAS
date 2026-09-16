@@ -216,7 +216,9 @@ return function(import)
                     track.Looped=sample.looped==1
                     if not track.IsPlaying then track:Play(0,0,0) end
                     track:AdjustSpeed(0)
-                    track:AdjustWeight(math.clamp(sample.weight,0,1),0)
+                    -- Roblox weights can exceed one; clamping changes the
+                    -- relative blend between otherwise identical recordings.
+                    track:AdjustWeight(math.max(sample.weight,0),0)
                     track.TimePosition=sample.time
                 end)
                 if animation then cleanup("Animation asset cleanup",function() animation:Destroy() end) end
@@ -229,7 +231,7 @@ return function(import)
             end
         end
         for key,track in pairs(self.tracks) do
-            if not alive[key] then destroyTrack(track); self.tracks[key]=nil end
+            if not alive[key] or not owned[track] then destroyTrack(track); self.tracks[key]=nil end
         end
         -- Remote/game scripts can start tracks after takeover. They must not blend
         -- unrecorded poses into the puppet, even when Animate is disabled.
@@ -304,6 +306,8 @@ return function(import)
             local signal=self.flagSignals[i]
             if signal then signal:Fire(frame.flags[i]==1) end
         end
+        local particles=self.root:FindFirstChild("SlideParticles")
+        if particles and particles:IsA("ParticleEmitter") then particles.Enabled=frame.flags[1]==1 end
     end
     function Character:Destroy() self:Release(); self.scope:Destroy() end
     return Character

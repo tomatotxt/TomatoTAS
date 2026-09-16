@@ -6,7 +6,8 @@ local heartbeat={Wait=function() elapsed+=0.1; yields+=1 end}
 local remote
 local storage={FindFirstChild=function(_,name) return if name=="Remote" then remote else nil end}
 local root={CFrame={}}
-local player={Character={HumanoidRootPart=root,FindFirstChild=function(_,name) return if name=="HumanoidRootPart" then root else nil end}}
+local player={Character={HumanoidRootPart=root,FindFirstChild=function(_,name) return if name=="HumanoidRootPart" then root else nil end,
+    FindFirstChildOfClass=function(_,name) return if name=="Humanoid" then {Health=100} else nil end}}
 local services={RunService={Heartbeat=heartbeat},Players={LocalPlayer=player},ReplicatedStorage=storage,
     HttpService={GenerateGUID=function() return "test-guid" end}}
 local environment=setmetatable({game={GetService=function(_,name) return services[name] end},workspace={},
@@ -26,6 +27,14 @@ local function object(name)
     state.GetAttribute=function(_,key) return state.attributes[key] end
     state.SetAttribute=function(_,key,value) state.attributes[key]=value end
     state.IsA=function() return false end
+    state.IsDescendantOf=function(_,ancestor)
+        local parent=state.Parent
+        while type(parent)=="table" do
+            if parent==ancestor then return true end
+            parent=parent.Parent
+        end
+        return false
+    end
     state.Destroy=function() state.Parent=nil; state.destroyed=true end
     local instance=setmetatable({},{__index=state,__newindex=function(_,key,value)
         if state.beforeWrite then state.beforeWrite(key,value) end
@@ -139,6 +148,29 @@ test("subthreshold drift cannot falsely settle",function()
     local ok=pcall(function() map:Settle(spawn) end)
     heartbeat.Wait=originalWait
     assert(not ok and elapsed>=10)
+    map:Destroy()
+end)
+test("living character readiness ignores temporary movement locks",function()
+    local original=player.Character
+    local root={Anchored=true}
+    local humanoid={Health=100,WalkSpeed=16}
+    local character={
+        FindFirstChild=function(_,name) return if name=="HumanoidRootPart" then root else nil end,
+        FindFirstChildOfClass=function(_,name) return if name=="Humanoid" then humanoid else nil end,
+    }
+    player.Character=character
+    local map=Map.new()
+    assert(map:LivingCharacter()==character)
+    map:Destroy()
+    player.Character=original
+end)
+test("wait timeout preserves an actionable reason",function()
+    elapsed,yields=0,0
+    local map=Map.new()
+    local ok,err=pcall(function()
+        map:Wait(function() return nil end,map.generation,"Timed out waiting for test readiness")
+    end)
+    assert(not ok and tostring(err):find("Timed out waiting for test readiness",1,true))
     map:Destroy()
 end)
 test("equal-size hierarchy replacement is rejected before cloning",function()

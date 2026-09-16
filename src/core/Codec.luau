@@ -108,7 +108,9 @@ return function(import, config)
         for i=5,6 do assert(f.humanoid[i]==0 or f.humanoid[i]==1,"Invalid humanoid flag") end
         assert(f.humanoid[7]>=0,"Invalid humanoid health")
         for _,t in ipairs(f.tracks) do
-            assert(t.time>=0 and t.weight>=0 and t.weight<=1 and t.priority%1==0
+            -- Roblox permits animation weights above one; the f64 reader/writer
+            -- already rejects nonfinite values before these semantic checks.
+            assert(t.time>=0 and t.weight>=0 and t.priority%1==0
                 and t.priority>=0 and t.priority<=1000 and (t.looped==0 or t.looped==1),"Invalid animation sample")
         end
         return f

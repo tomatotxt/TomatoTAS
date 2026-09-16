@@ -56,15 +56,18 @@ return function(import,config)
     end
     function App.new()
         local keys=App.Validate()
-        local self=setmetatable({scope=Scope.new(),map=Map.new(),mode="idle",speed=1,camera=true,
+        local self=setmetatable({scope=Scope.new(),mode="idle",speed=1,camera=true,
             playbackMode="time",time=0,frameIndex=1,busy=false,cancelId=0,keys=keys},App)
+        local ok,err=xpcall(function()
+        self.map=Map.new()
         self.scope:Add(RS.PostSimulation:Connect(function(dt)
             self:Guard(function()
                 if self.mode=="recording" or self.mode=="stepping" then
                     self:Ready()
                     if dt<=0 then return end
-                    self.time+=dt
-                    self.tree:Append(self.character:Capture(self.time,self.map.origin))
+                    local time=self.time+dt
+                    self.tree:Append(self.character:Capture(time,self.map.origin))
+                    self.time=time
                     if self.mode=="stepping" then self:Pause() end
                 end
             end)
@@ -124,14 +127,19 @@ return function(import,config)
             if action=="Stop" or action=="Unload" then self:Dispatch(action); return end
             if action and not self.busy then task.spawn(function() self:Dispatch(action) end) end
         end))
+        end,debug.traceback)
+        if not ok then
+            self.scope:Destroy()
+            if self.map then pcall(function() self.map:Destroy() end) end
+            error(err,0)
+        end
         return self
     end
     function App:Guard(fn)
         if self.scope.dead then return end
         local ok,err=xpcall(fn,debug.traceback)
         if not ok then
-            self.mode="idle"
-            if self.character then pcall(function() self.character:Release() end) end
+            self:Stop()
             self:Notify(tostring(err),"error")
         end
         return ok
@@ -178,6 +186,7 @@ return function(import,config)
         local ready=self:ReadyReason()
         if ready then return ready end
         if action=="Record" and self.mode=="playing" then return "Pause playback before recording a branch." end
+        if action=="Record" and self.mode~="recording" then return self:RecordReason() end
         if action=="Step" and self.mode~="paused" then return "Pause before advancing one physics frame." end
         if action=="Restore" and not self.tree.marks.quick then return "No quick character mark. Save one with F4 first." end
         return nil
@@ -198,8 +207,12 @@ return function(import,config)
         config.File=name
     end
     function App:Attach(character)
-        if self.character then self.character:Destroy() end
-        self.character=Character.new(character)
+        local nextCharacter=Character.new(character)
+        if self.character then
+            local ok,err=pcall(function() self.character:Destroy() end)
+            if not ok then warn("[TomatoTAS] Previous character cleanup: "..tostring(err)) end
+        end
+        self.character=nextCharacter
     end
     function App:Prepare()
         self:Stop()
@@ -226,6 +239,10 @@ return function(import,config)
         if not self.character or not self.character:Valid() or not self.map.origin then return "Prepare a map and living character first." end
         local model=self.map.clone or self.map.live
         if not model or not model.Parent then return "Prepared map was removed. Prepare the current map first." end
+        if self.map.ReadyReason then
+            local reason=self.map:ReadyReason()
+            if reason then return reason end
+        end
         if self.tree and not ignoreRun then
             if self.tree.metadata.map~=self.map.name then return "Loaded run belongs to another map; call NewRun to start fresh." end
             if self.tree.metadata.spawn~=self.map.spawnName then return "Spawn path differs from the recorded map." end
@@ -237,15 +254,30 @@ return function(import,config)
         assert(not reason,reason)
     end
     function App:NewRun()
-        self:Stop(); self:Ready(true)
-        self.tree=Tree.new({map=self.map.name,spawn=self.map.spawnName,author=Players.LocalPlayer.Name,created=os.time()})
+        self:Ready(true)
+        -- Capture and validate frame zero before replacing a recoverable recording.
+        local tree=Tree.new({map=self.map.name,spawn=self.map.spawnName,author=Players.LocalPlayer.Name,created=os.time()})
+        tree:Append(self.character:Capture(0,self.map.origin))
+        self:Stop()
+        self.tree=tree
         self.time=0; self.path=nil; self.current=nil
-        self.tree:Append(self.character:Capture(0,self.map.origin))
+        self.frameIndex=1; self.duration=nil
+    end
+    function App:RecordReason()
+        -- An anchor owned by FE2 must finish loading before recording. A saved
+        -- puppet anchor is ours and will be released by Character:Resume.
+        if self.character and self.character.root and self.character.root.Anchored
+            and (not self.character.saved or self.character.saved.anchored) then
+            return "Character movement is locked. Wait for FE2 to finish spawning before recording."
+        end
+        return nil
     end
     function App:Record()
         self:Ready()
         assert(self.mode~="playing","Pause playback before recording a branch")
-        if not self.tree then self:NewRun() end
+        local reason=self:RecordReason()
+        assert(not reason,reason)
+        if not self.tree or #self.tree.nodes==0 then self:NewRun() end
         self.time=self.tree.nodes[self.tree.cursor].frame.time
         self.character:Resume(self.tree.nodes[self.tree.cursor].frame,self.map.origin)
         self.current=nil; self.path=nil
@@ -263,7 +295,7 @@ return function(import,config)
     end
     function App:Play(tip,mode)
         self:Ready()
-        assert(self.tree,"No run loaded or recorded")
+        assert(self.tree and #self.tree.nodes>0,"No run loaded or recorded")
         assert(mode==nil or mode=="time" or mode=="frames","Playback mode must be time or frames")
         if tip then self.tree:Seek(tip) end
         if tip or not self.path or self.mode~="paused"
@@ -277,6 +309,7 @@ return function(import,config)
         end
         self.duration=self.tree.nodes[self.path[#self.path]].frame.time
         self.playbackMode=mode or self.playbackMode
+        self.tree.cursor=self.path[self.frameIndex]
         self.current=self.tree.nodes[self.path[self.frameIndex]].frame
         self.character:Apply(self.current,self.map.origin,self.camera)
         self.mode="playing"

@@ -4,8 +4,11 @@ assert(type(source)=="string" and #source>0,"Run this suite through scripts/chec
 local function run(config,fixtures,options)
     options=options or {}
     local requests,events={},{}
-    local previous={Destroy=function() table.insert(events,"destroy") end}
-    local nextApp={name="new",scope={Add=function() end}}
+    local previous={Destroy=function()
+        table.insert(events,"destroy")
+        if options.destroyError then error("old cleanup failed") end
+    end}
+    local nextApp={name="new",scope={Add=function() end},Destroy=function() table.insert(events,"discard") end}
     local shared={TomatoTASConfig=config,TomatoTAS=previous}
     local environment
     environment=setmetatable({
@@ -25,7 +28,11 @@ local function run(config,fixtures,options)
             table.insert(events,"validate")
             if options.invalid then error("capability validation failed") end
         end,
-        onNew=function() table.insert(events,"new"); return nextApp end,
+        onNew=function()
+            table.insert(events,"new")
+            if options.newError then error("initialization failed") end
+            return nextApp
+        end,
         inspectConfig=options.inspectConfig or function() end,
     },{__index=getfenv()})
     environment.loadstring=function(body,name)
@@ -45,7 +52,7 @@ test("loader defaults target TomatoTAS live",function()
     local r=run(nil,{App=appSource})
     assert(r.ok and r.result==r.nextApp and r.shared.TomatoTAS==r.nextApp)
     assert(r.requests[1]=="https://raw.githubusercontent.com/tomatotxt/TomatoTAS/live/src/App.luau")
-    assert(table.concat(r.events,",")=="validate,destroy,new")
+    assert(table.concat(r.events,",")=="validate,new,destroy")
 end)
 test("owner repo and branch are shared by every cached module",function()
     local config={Owner="other",Repo="other-repo",Branch="feature/example",Timeout=12}
@@ -62,6 +69,17 @@ end)
 test("validation failure preserves the existing session",function()
     local r=run(nil,{App=appSource},{invalid=true})
     assert(not r.ok and r.shared.TomatoTAS==r.previous and table.concat(r.events,",")=="validate")
+end)
+test("constructor failure preserves the existing session",function()
+    local r=run(nil,{App=appSource},{newError=true})
+    assert(not r.ok and r.shared.TomatoTAS==r.previous)
+    assert(table.concat(r.events,",")=="validate,new")
+end)
+test("handoff failure destroys the unused replacement",function()
+    local r=run(nil,{App=appSource},{destroyError=true})
+    assert(not r.ok and r.shared.TomatoTAS==r.previous)
+    assert(table.concat(r.events,",")=="validate,new,destroy,discard")
+    assert(tostring(r.result):find("Could not replace the previous session",1,true))
 end)
 test("missing and invalid module responses preserve the existing session",function()
     for _,fixtures in ipairs({{}, {App="404: Not Found"}, {App="<html>unavailable</html>"},

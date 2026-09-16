@@ -24,8 +24,8 @@
   URLs, module caching, bad responses, dependency cycles, rejected configuration,
   and preserving a previous session when validation fails.
 
-Current local result: **20 Luau files compile; 103 tests pass** (25 core,
-26 controller, 14 map, 10 character, 10 storage, 8 loader, 10 GUI).
+Current local result: **20 Luau files compile; 105 tests pass** (25 core,
+26 controller, 16 map, 10 character, 10 storage, 8 loader, 10 GUI).
 GUI tests use native-widget doubles to check construction, responsive scaling,
 disabled actions, timeline selection, file/branch wiring, minimization and cleanup.
 They do not render the interface in Roblox; in-game visual validation is pending.

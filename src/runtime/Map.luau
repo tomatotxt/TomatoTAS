@@ -24,64 +24,82 @@ return function(import,config)
         end
         return self
     end
-    function Map:Check(token,deadline)
+    function Map:Check(token,deadline,timeoutMessage)
         assert(not self.scope.dead and self.generation==token,"Map operation cancelled")
-        assert(os.clock()<deadline,"Map operation timed out")
+        assert(os.clock()<deadline,timeoutMessage or "Map operation timed out")
     end
-    function Map:Wait(predicate,token)
+    function Map:Wait(predicate,token,timeoutMessage)
         local deadline=os.clock()+config.Timeout
         repeat
-            self:Check(token,deadline)
+            self:Check(token,deadline,timeoutMessage)
             local result=predicate()
             if result then return result end
             RS.Heartbeat:Wait()
         until false
+    end
+    function Map:LivingCharacter()
+        local character=Players.LocalPlayer.Character
+        local root=character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+        if root and humanoid and humanoid.Health>0 then return character end
+        return nil
+    end
+    function Map:ReadyReason()
+        if self.scope.dead then return "Map runtime has been destroyed" end
+        local model=self.clone or self.live
+        if not model then return "Prepare a map first" end
+        if self.clone then
+            if model.Parent~=workspace then return "Sandbox was removed; reload and prepare again" end
+        else
+            local multiplayer=workspace:FindFirstChild("Multiplayer")
+            if not multiplayer or model.Parent~=multiplayer or multiplayer:FindFirstChild("Map")~=model then
+                return "Live map changed; prepare the current round first"
+            end
+        end
+        local spawn=if self.clone then self.cloneSpawn else self.spawn
+        if not spawn or not spawn:IsDescendantOf(model) then return "Prepared spawn was removed; prepare again" end
+        return nil
+    end
+    function Map:FindSpawn(live,root)
+        local spawn=live:FindFirstChild("Spawn",true)
+        if spawn and spawn:IsA("BasePart") and (spawn.Position-root.Position).Magnitude<60 then
+            return spawn
+        end
+        local params=RaycastParams.new()
+        params.FilterType=Enum.RaycastFilterType.Include
+        params.FilterDescendantsInstances={live}
+        local result=workspace:Raycast(root.Position,Vector3.new(0,-25,0),params)
+        spawn=result and result.Instance
+        return if spawn and spawn:IsA("BasePart") and spawn:IsDescendantOf(live) then spawn else nil
     end
     function Map:Acquire()
         assert(not self.scope.dead,"Map operation cancelled")
         assert(not self.clone,"Destroy the sandbox before acquiring another map")
         self.generation+=1
         local token=self.generation
-        local multiplayer=assert(workspace:FindFirstChild("Multiplayer"),"FE2 Multiplayer container missing")
-        local live=multiplayer:FindFirstChild("Map")
-        if not live then
-            -- Subscribe before checking again so arrival and rename cannot be missed.
-            local watch=Scope.new()
-            local function inspect(model)
-                if model.Name=="Map" and model.Parent==multiplayer then live=model
-                elseif model.Name=="NewMap" then
-                    watch:Add(model:GetPropertyChangedSignal("Name"):Connect(function()
-                        if model.Name=="Map" and model.Parent==multiplayer then live=model end
-                    end))
-                end
-            end
-            watch:Add(multiplayer.ChildAdded:Connect(inspect))
-            for _,model in ipairs(multiplayer:GetChildren()) do inspect(model) end
-            local ok,err=pcall(function() self:Wait(function() return live end,token) end)
-            watch:Destroy()
-            assert(ok,err)
-        end
+        local multiplayer=self:Wait(function() return workspace:FindFirstChild("Multiplayer") end,token,
+            "Timed out waiting for FE2's Multiplayer container. Wait for the game to load and retry Prepare.")
+        self:Wait(function() return multiplayer:FindFirstChild("Map") end,token,
+            "Timed out waiting for the FE2 map. Start a round and retry Prepare.")
+        -- FE2 can temporarily anchor the root or lower WalkSpeed while placing a
+        -- player at spawn. The live map and spawn checks below are the authority
+        -- for location; neither movement state nor a hard-coded lobby position is.
+        local live,root,spawn
         local character=self:Wait(function()
-            local c=Players.LocalPlayer.Character
-            local r=c and c:FindFirstChild("HumanoidRootPart")
-            local h=c and c:FindFirstChildOfClass("Humanoid")
-            if r and h and h.Health>0 and not r.Anchored and h.WalkSpeed>=20
-                and (r.Position-Vector3.new(-25,-144,139)).Magnitude>300 then return c end
-            return nil
-        end,token)
-        assert(live.Parent==multiplayer,"Map was removed during acquisition")
-        local root=character.HumanoidRootPart
-        local spawn=live:FindFirstChild("Spawn",true)
-        if not (spawn and spawn:IsA("BasePart") and (spawn.Position-root.Position).Magnitude<60) then
-            local params=RaycastParams.new()
-            params.FilterType=Enum.RaycastFilterType.Include
-            params.FilterDescendantsInstances={live}
-            local result=workspace:Raycast(root.Position,Vector3.new(0,-25,0),params)
-            spawn=result and result.Instance
-        end
-        assert(spawn and spawn:IsA("BasePart"),"No spawn beneath character; stand on spawn and retry")
+            -- Map replication can finish before the lobby character is moved. Look
+            -- up the current map each time so a new round cannot leave a stale map.
+            live=multiplayer:FindFirstChild("Map")
+            local candidate=self:LivingCharacter()
+            if not live or not candidate then return nil end
+            root=candidate:FindFirstChild("HumanoidRootPart")
+            spawn=self:FindSpawn(live,root)
+            return if spawn then candidate else nil
+        end,token,"Timed out waiting for a living character at the FE2 map spawn. Join a round and retry Prepare.")
         self:Settle(spawn,token)
-        assert(Players.LocalPlayer.Character==character and live.Parent==multiplayer,"Character/map changed during settling")
+        assert(self:LivingCharacter()==character and character:FindFirstChild("HumanoidRootPart")==root,
+            "Character changed or died during settling; retry Prepare.")
+        assert(live.Parent==multiplayer and multiplayer:FindFirstChild("Map")==live and spawn:IsDescendantOf(live),
+            "Map/spawn changed during settling; retry Prepare.")
         local settings=live:FindFirstChild("Settings")
         self.live,self.spawn=live,spawn
         self.ropes=self.ropeCache[live]
@@ -109,10 +127,10 @@ return function(import,config)
         local anchor=spawn.CFrame
         local since=os.clock()
         while os.clock()-since<1 do
-            self:Check(token,deadline)
+            self:Check(token,deadline,"Spawn kept moving for too long; wait for the platform to settle and retry.")
             assert(spawn.Parent,"Spawn removed while settling")
             RS.Heartbeat:Wait()
-            self:Check(token,deadline)
+            self:Check(token,deadline,"Spawn kept moving for too long; wait for the platform to settle and retry.")
             assert(spawn.Parent,"Spawn removed while settling")
             local current=spawn.CFrame
             local _,angle=anchor:ToObjectSpace(current):ToAxisAngle()
@@ -120,7 +138,7 @@ return function(import,config)
                 anchor=current; since=os.clock()
             end
         end
-        self:Check(token,deadline)
+        self:Check(token,deadline,"Spawn kept moving for too long; wait for the platform to settle and retry.")
     end
     function Map:RestoreRopes(character,quiet)
         if self.scope.dead then return false end
@@ -137,7 +155,8 @@ return function(import,config)
             local ok,env=pcall(getsenv,scriptObject)
             return if ok and type(env)=="table" and type(env.startZipline)=="function" then env.startZipline else nil
         end
-        local fn=if quiet then closure() else self:Wait(closure,token)
+        local fn=if quiet then closure() else self:Wait(closure,token,
+            "Timed out waiting for FE2's zipline script to initialize. Respawn and retry.")
         if not fn then return false end
         local current=getupvalue(fn,2)
         if current==self.ropes then return true end
@@ -156,8 +175,7 @@ return function(import,config)
         local deadline=os.clock()+config.Timeout
         self:Check(token,deadline)
         assert(live.Parent==liveParent,"Live map changed during settling")
-        local character=Players.LocalPlayer.Character
-        assert(character and character:FindFirstChild("HumanoidRootPart"),"Character unavailable")
+        local character=assert(self:LivingCharacter(),"Living character unavailable")
         local offset=spawn.CFrame:ToObjectSpace(character.HumanoidRootPart.CFrame)
         local queue={live}
         for _,item in ipairs(live:GetDescendants()) do table.insert(queue,item) end
@@ -250,17 +268,18 @@ return function(import,config)
             if nextCharacter and nextCharacter~=old and nextCharacter:FindFirstChild("HumanoidRootPart")
                 and humanoid and humanoid.Health>0 then return nextCharacter end
             return nil
-        end,token)
+        end,token,"Timed out waiting for a new living character. Respawn and retry sandbox respawn.")
         local remote=Storage:FindFirstChild("Remote")
         if remote and remote:FindFirstChild("RemoveWaiting") then remote.RemoveWaiting:FireServer() end
         self:RestoreRopes(c)
         self:Settle(spawn,token)
-        assert(Players.LocalPlayer.Character==c and c:FindFirstChildOfClass("Humanoid").Health>0,
+        assert(self:LivingCharacter()==c,
             "Character changed during sandbox respawn")
-        assert(self.clone==clone and clone.Parent and spawn.Parent,"Sandbox was removed during respawn")
-        c.HumanoidRootPart.CFrame=spawn.CFrame*offset
-        c.HumanoidRootPart.AssemblyLinearVelocity=Vector3.zero
-        c.HumanoidRootPart.AssemblyAngularVelocity=Vector3.zero
+        assert(self.clone==clone and clone.Parent and spawn:IsDescendantOf(clone),"Sandbox was removed during respawn")
+        local root=c:FindFirstChild("HumanoidRootPart")
+        root.CFrame=spawn.CFrame*offset
+        root.AssemblyLinearVelocity=Vector3.zero
+        root.AssemblyAngularVelocity=Vector3.zero
         return c
     end
     function Map:Destroy()

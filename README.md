@@ -70,9 +70,9 @@ the panel, or set `GUI = false` to run without it. No third-party UI library or
 remote image assets are required.
 
 1. Load the tool before a new FE2 round when possible, so it captures zipline data.
-2. Stand on the map's spawn platform and press **F1**. Preparation verifies you
-   have left the lobby, finds the spawn, and waits for one continuous second of
-   stability. Small movements accumulate against the start of the stable interval.
+2. Stand on the map's spawn platform and press **F1**. Preparation verifies a
+   living character and the live-map spawn, then waits for one continuous second
+   of stability. Small movements accumulate against the start of the stable interval.
 3. For a static local clone, press **F8**. This prepares a clone and respawns you
    onto its settled spawn. It does not simulate server-controlled map mechanics.
    Clone creation may take time on large maps; do not change rounds during it.

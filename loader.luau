@@ -53,10 +53,18 @@ local function import(name)
     return result
 end
 local App = import("App")
--- Validate configuration/capabilities before unloading an already running session.
+-- Finish constructing the replacement before unloading an already running
+-- session. A failed initialization must leave its recording and controls alive.
 App.Validate()
-if env.TomatoTAS then env.TomatoTAS:Destroy() end
 local app = App.new()
+local previous = env.TomatoTAS
+if previous then
+    local ok, err = pcall(function() previous:Destroy() end)
+    if not ok then
+        pcall(function() app:Destroy() end)
+        error("[TomatoTAS] Could not replace the previous session: " .. tostring(err), 0)
+    end
+end
 env.TomatoTAS = app
 if config.GUI~=false then
     local ok,err=pcall(function()

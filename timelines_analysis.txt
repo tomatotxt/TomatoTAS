@@ -1,0 +1,404 @@
+TOMATOTAS: MAP EVENTS, TIMELINES, AND BUTTON HANDLING
+Focused reference-code analysis | 2026-09-16
+
+Scope and evidence
+==================
+This document analyzes the supplied references, not the new TomatoTAS runtime.
+Paths below are relative to TomatoTAS. Line numbers refer to the saved files,
+not the original source-line comments inside the decompiled ScriptMap dump.
+No game session was run and no server implementation was available. Findings
+about the decompiled code describe the supplied snapshot, not guaranteed current
+FE2 behavior. Reference-document instructions were treated as source material.
+
+The central finding
+===================
+The legacy Creator combines THREE different mechanisms:
+
+1. MapEvents: a journal of observed property changes during a live-map prepass.
+2. Native timelines: FE2 Configuration/ObjectValue programs launched on touches.
+3. ButtonRegistry: local pressed flags, ordering checks, and colored outlines.
+
+These are not one deterministic map simulator. Rewinding the property journal
+does not rewind native timeline tasks, their debounce state, or the server.
+Pressing a cloned button does not itself execute FE2's server button logic.
+The exported run contains character telemetry, not this environment journal.
+
+1. SOURCE INDEX
+===============
+references/creator
+  324-364    InitClonedMapTimelines: cloned local-touch timeline binding.
+  460-505    SaveRunToFile: binary payload, relevant to missing world data.
+  701-773    UpdateMapState: forward/reverse property-journal application.
+  776-801    SyncButtonState: logical rewind and visual button indicators.
+  848-856    Cleanup of map/button tables and clone.
+  860-898    Pause accounting and savestate restore.
+  958-1021   UUID assignment, initial clone, change/destruction recording.
+  1023-1118  Button discovery, traversal, and approximate timing capture.
+  1130-1187  End prepass, clone binding, baseline restoration, timeline init.
+  1189-1299  Water discovery and two cloned-button discovery/binding paths.
+  1303-1337  Frame stepping/rewinding and environment seek calls.
+  1435-1436  Preview playback updates map and button state.
+  1521-1537  Main heartbeat and the separate real/visual clocks.
+  1608-1616  Environment pause and smart environment synchronization toggles.
+
+references/new.luau
+  Single-line minified Creator variant. Relevant named sections include
+  InitClonedMapTimelines, UpdateMapState, SyncButtonState, TrackPart,
+  PropWhitelist, ButtonPressTimings, and the cloned-button callbacks.
+  Inspected sections reproduce the same mechanisms and limitations described
+  here. This is not a claim that both entire files are byte-for-byte equivalent.
+
+references/ScriptMap.txt
+  8922-9279    CL_Buttons: active-goal locator and real button request path.
+  18462-18562  CL_TimelineWrapper: remote dispatch and local touch activation.
+  28552-29038  SharedMapScriptModule: client XFrame operations.
+  29047-29275  TimelinePlayer: validation, scheduling, conditional chaining.
+  1919-1925   ResetClientTimelines: disables/re-enables the native wrapper.
+  3691        TEST.HaltTimelines connects to that reset function.
+  3226-3285   WaterState.Value/NoSwim feed liquid behavior.
+  3370-3378   DrainMultiplier/DepthMultiplier influence liquid effects.
+  4431-4496   Replicated currentButton drives progress/goal presentation.
+  23571-23599 Developer NextButton and HaltTimelines remote requests.
+
+references/player
+  311-351    Reads header and character/camera/animation frame payload.
+  502-519    Starts its clock from StartClientMapTimer or fallback.
+  527 onward Advances/interpolates character frames using elapsed time.
+  No MapEvents, native timeline scheduler, or button registry implementation
+  was found. This Player relies on the surrounding live game for map behavior.
+
+references/mapload_example.luau is a map-acquisition/clone/spawn-settle example,
+not a timeline or button simulator. references/context_prompt.txt supplies
+background on liquid/character behavior but is not executable evidence for a
+complete map rewind implementation. Ordinary menu/gamepad button code in the
+large dump is unrelated to map buttons and is excluded from this analysis.
+
+2. LEGACY MAP EVENT CAPTURE
+==========================
+The Creator tags existing BaseParts, Decals, and Textures with TAS_UUID, then
+clones the live map BEFORE the recording prepass. The clone remains unparented
+while the live map runs (creator:958-970).
+
+TrackPart caches whitelisted properties, subscribes to Changed and Destroying,
+and appends events timestamped os.clock() - StartTime (978-1017). Existing
+descendants are registered and DescendantAdded registers later ones (1020-1021).
+
+Captured properties:
+  BasePart: CFrame, Transparency, CanCollide, Color, Size, Anchored, Material,
+            Reflectance.
+  Decal:    Transparency, Color3, Texture.
+  Texture:  Transparency, Color3, Texture, OffsetStudsU/V, StudsPerTileU/V.
+
+Normal event shape:
+  { Time, UUID, Prop, OldVal, NewVal }
+Anchored changes additionally store StoredCFrame and StoredCanCollide.
+Destruction events store a cached property table plus UUIDs and cached states
+of direct Decal/Texture children. They do not store a general instance tree.
+
+At the end, recorders disconnect, the live map is destroyed locally, and the
+initial clone is parented to workspace. A UUID-to-clone lookup supplies each
+event's Instance. Non-destruction events are walked backwards to apply OldVal
+and establish an initial state (1130-1146).
+
+Important implications:
+  - This captures one observed execution, including its particular button
+    timings. It does not capture the causal rules producing the changes.
+  - DescendantAdded starts property tracking but does not insert a creation
+    event or add the new object to the already-created clone. Its events can
+    have no clone counterpart and are silently skipped during replay.
+  - Attributes, ValueBase values, reparenting, constraints, scripts, task state,
+    and most non-part instances are outside the property whitelist.
+  - In particular, WaterState.Value and its NoSwim/drain/depth attributes are
+    semantically significant in FE2 but absent from this journal.
+  - Changed callbacks are observations, not a fixed-step trajectory recorder.
+    The code does not guarantee every physics-driven transform is captured.
+  - Append order is used directly; there is no explicit deterministic event
+    sequence identifier or independent causal grouping.
+
+3. PROPERTY REPLAY AND REWIND
+============================
+UpdateMapState uses PlaybackIndex as the next unapplied event. Forward seeks
+apply all events with Time <= target. Backward seeks undo events with Time >
+target, in reverse array order. Ordinary properties use NewVal forward and
+OldVal backward (creator:701-773).
+
+This is a useful reversible-journal pattern when every state change is captured
+and nothing else writes those properties. Those assumptions do not hold here.
+
+Destruction is simulated by hiding a retained object. Parts also become
+noncollidable and anchored; direct decal/texture children are hidden. Undo
+restores a subset of saved properties. CanTouch/CanQuery are not disabled, and
+the object and its callbacks still exist. Therefore a visually destroyed part
+is not equivalent to an actually destroyed instance.
+
+Anchored changes are special-cased: an unanchored noncollidable part is kept
+anchored and hidden. Undoing an anchored transition can force Transparency=0
+and zero Velocity/RotVelocity instead of restoring the exact prior values.
+This is a visual/physics workaround, not an invertible world-state operation.
+
+The cursor only writes properties when crossing events. If a native task or
+physics changes a property after the cursor has passed its event, seeking to
+the same time does not necessarily repair that property.
+
+EnvPaused returns before both forward and reverse replay. Consequently a
+savestate load can restore the character without restoring the environment
+while that option is enabled (702; 877-892).
+
+4. CLOCKS AND ENVIRONMENT SYNCHRONIZATION
+=======================================
+Prepass journal clock:
+  captureTime = os.clock() - StartTime
+
+Creator character clock:
+  realTime = os.clock() - RunStart - TimeOffset
+  While paused, PauseStart replaces the current os.clock().
+
+Environment preview clock:
+  visualTime = max(0, realTime + PreviewOffset)
+
+The main heartbeat seeks map properties to visualTime, but gives both clocks
+to button synchronization. Forward/backward preview adjusts PreviewOffset at
+five seconds per real second (creator:1521-1537).
+
+Smart environment sync on a button sets:
+  PreviewOffset = capturedButtonTime - currentRealTime
+
+This aligns the recorded environment to a prepass button timestamp. It does
+not reschedule native timeline tasks or reconstruct the map's causal history.
+A single global offset can move every recorded event, including unrelated
+sequences, when only one button-dependent sequence should move.
+
+Native timelines use task.wait and their own runtime start, independent of
+these clocks. The native Player also has a separate map-start timer. These
+clock domains must not be mistaken for one unified frame timeline.
+
+5. NATIVE FE2 TIMELINE DATA AND EXECUTION
+=======================================
+TimelinePlayer.ValidateIsTimeline recognizes Configuration objects. On the
+server it accepts Trigger_Dormant, Trigger_Delay, Trigger_Button,
+Trigger_Timeline, or Trigger_Touch, while rejecting LocalTrigger_ attributes.
+On the client it accepts LocalTrigger_Dormant or LocalTrigger_Touch
+(ScriptMap:29057-29087).
+
+An XFrame is an ObjectValue with string XFrame_Function and numeric
+XFrame_Timestamp. Its Value references its target. Attributes supply operation
+parameters, XFrame_Length, XFrame_Priority, and related options.
+
+PlayTimeline behavior (29126-29273):
+  - Uses supplied speed or 1; waits Trigger_Delay divided by speed.
+  - Scans descendants for valid XFrames, grouping them by timestamp.
+  - Sorts each timestamp group by descending priority.
+  - Launches one task per timestamp group; each waits timestamp/speed.
+  - Dispatches to server MapScriptModule.PerformXFrame or client
+    SharedMapScriptModule.PerformClientXFrame according to runtime side.
+  - A truthy operation result suppresses further dispatch through shared v22
+    and can launch the referenced Conditional_Timeline.
+  - Server-side completion can start timelines whose Trigger_Timeline names
+    the completed timeline. That completion scan is not a client behavior.
+
+GetTimelineDuration considers timestamps, lengths, repeats, reverse tweens,
+and delay, with infinite repeat represented as math.huge (29095-29124).
+It scans direct children, whereas execution scans descendants: nested layouts
+deserve testing. The provided RepeatOnCompletion conditional has an EMPTY body
+(29251-29252). This could be a decompilation omission; it is not evidence that
+repeat behavior is correctly implemented or absent in the original game.
+
+Other caveats from the snapshot:
+  - XFrame_Length is mutated in place by division by playback speed, then the
+    client dispatcher divides the resulting length again. Non-unit speed
+    risks repeated/double scaling. Creator passes 1, avoiding that case.
+  - Equal-priority ties have no explicit stable order.
+  - Real-time tasks offer no exposed seek, snapshot, or cancellation handle.
+  - The supplied server MapScriptModule implementation is missing. Knowing
+    Trigger_Button exists does not reveal complete server button semantics
+    or all server-only XFrame functions/tween behavior.
+
+6. CLIENT XFRAME OPERATIONS AND SANDBOX IMPLICATIONS
+==================================================
+PerformClientXFrame accepts an ObjectValue or a serialized table containing
+Name, Value, and Attributes (ScriptMap:28896-29038). Its dispatch cases are:
+
+  SetProperties: extracts Property_* attributes, optionally affects descendants.
+  SetHumanoid: applies allowed humanoid properties to the local player.
+  SetCamera: updates LocalMapCamera, optionally disables it after a delay.
+  ShakeCamera: heartbeat-driven random camera offsets.
+  Teleport: moves the local character to target plus translation.
+  Alert: displays an alert.
+  Sound: creates/plays a sound or uses the game's sound dispatch.
+  Conditional: compares properties/attributes and returns failure status.
+
+SetProperties forbids Archivable/Name/Parent; on the client it also rejects
+PVInstance, BasePart, GuiBase, and UIBase targets (28825-28893). This client
+module is not a general replacement for server map geometry/tween execution.
+
+Crucially, these operations are NOT all offline-only:
+  SetHumanoid -> ValidateLocalSetHumanoid:FireServer (28583-28585).
+  Teleport    -> ClientTimelines.Teleport:FireServer (28655-28661).
+  SetCamera   -> UpdLocalMapCamera:FireServer (28677-28685).
+
+Passing a cloned map into PlayTimeline does not override these service calls.
+Nor does it supply a general target-remapping context to PerformClientXFrame.
+ObjectValue references outside a cloned subtree require explicit auditing.
+
+Camera delays, random shake, generated sounds, and changed humanoid attributes
+are outside the Creator's MapEvents whitelist. Calling the native engine cannot
+by itself provide repeatable seek/rewind for those effects.
+
+7. NATIVE TOUCH WRAPPER VERSUS CREATOR'S WRAPPER
+==============================================
+CL_TimelineWrapper receives PerformClientXFrame remotes, waits for Run to enable
+local activation, and binds configurations supplied by InitClientTimelines
+(ScriptMap:18481-18562). Native touch activation requires the local player's
+FE2_Hitbox. It caps matching trigger parts at 64 and supports one-shot behavior
+when neither debounce nor allow-multiple is enabled. Reusable touch cooldowns
+are scaled by playback speed.
+
+Creator InitClonedMapTimelines scans the clone for client-valid timelines but
+only binds nonempty LocalTrigger_Touch names (creator:324-364). It does not
+initialize every server Trigger_* timeline or automatically launch dormant
+ones. It spawns PlayTimeline at speed 1 when touched.
+
+Differences with practical effects:
+  - Creator always clears debounce after a numeric cooldown or one second,
+    turning native one-shot cases into repeatable activations.
+  - Creator shares a per-timeline debounce table across matching parts; the
+    native wrapper creates a per-part table plus a shared activation flag.
+  - Creator accepts any local character child OR any part named FE2_Hitbox,
+    instead of requiring both local ownership and that exact hitbox name.
+  - The callback does not check character pause, environment pause, or preview
+    mode. Already-spawned timeline tasks are not controlled by those flags.
+  - Disconnecting the touch connection does not cancel previously spawned
+    PlayTimeline tasks or delayed side effects.
+
+Thus the journal and native tasks can independently write world/character
+state. Rewinding one system leaves the other system's execution state intact.
+
+8. REAL FE2 BUTTON HANDLING
+==========================
+The strongest supplied evidence is CL_Buttons, not the Creator's heuristics.
+Remote.UpdGoalLocator invokes focusNewGoal (ScriptMap:9279). That function
+receives the current goal/button references and associates the touch handler
+with the current target (9007-9011; 9059-9090).
+
+The touch handler requires:
+  - its captured target still equals the current target;
+  - the touched part is the local character's FE2_Hitbox;
+  - the distance check against target size passes;
+  - its short debounce is clear.
+
+It sets a 0.05-second debounce, calls PressedMapButton:FireServer(target), and
+grays the icon descendants. This visual feedback is a request-side action,
+not proof of authoritative server acceptance. Replicated currentButton updates
+separately drive progress displays (4431-4496).
+
+The server receiver, its acceptance rules, and its actual Trigger_Button
+dispatch are not included. Therefore authoritative ordering, multi-player
+requirements, and all map-specific effects cannot be reconstructed conclusively
+from this dump alone. Developer TEST.NextButton is a separate testing endpoint,
+not evidence that normal gameplay or offline simulation should use it.
+
+9. CREATOR BUTTON PREPASS AND LOCAL OVERLAY
+=========================================
+During prepass the Creator uses button-model/hitbox heuristics, including
+random-looking uppercase names, and looks for TouchInterest plus BillboardGui.
+It moves toward candidate hitboxes at 20 studs/second, moves onto the target,
+waits 0.1 seconds, then records os.clock() - StartTime as exactTouchTime
+(creator:1023-1109).
+
+Despite that variable name, this is not an exact touch-event timestamp or a
+server acknowledgment. Contact can occur during traversal, and the explicit
+wait adds delay. A UUID is inserted into RecordedButtonSequence only once,
+while its timing can be overwritten on later encounters.
+
+After cloning, two discovery paths look for ButtonIcon ancestry or a
+random-named model's Hitbox/fallback colored part (1214-1299). Each registered
+part gets a SelectionBox and this state:
+  IsPressed, PressTime, TruePressTime (after touch), Order, RecordedTime.
+
+Order comes from the prepass UUID sequence, otherwise sentinel 999. Touching
+the clone checks the previous registered button, optionally adjusts the global
+PreviewOffset, sets local flags, colors the outline, and shows an alert.
+These callbacks neither send PressedMapButton nor dispatch Trigger_Button
+timelines. Their only world-time effect is the optional global preview offset.
+
+SyncButtonState reverses a local pressed flag when its TruePressTime is after
+RealTime. Colors instead compare TruePressTime with VisualTime. Yellow means
+the next known unpressed button, red a later one, green visually pressed, and
+orange an unclassified button (776-801).
+
+Specific weaknesses:
+  - Rewind clears IsPressed and PressTime, but retains TruePressTime. Forward
+    preview can color a button green without restoring its logical pressed
+    flag. There is no complete forward replay of logical button events.
+  - Only one mutable timestamp is retained per button, not a branch-aware press
+    history. Revisiting an earlier branch cannot recover overwritten history.
+  - All unknown buttons write OrderedButtonRegistry[999], overwriting that
+    slot. They remain individually present in ButtonRegistry, but not uniquely
+    represented in the ordering table.
+  - A missing previous-order entry allows the touch check to proceed; it does
+    not validate the full chain of earlier required presses.
+  - Discovery can choose a different part from the UUID-tagged prepass hitbox,
+    losing timing/order association. Random-name/color heuristics are fragile.
+  - Touch callbacks use a running os.clock expression even while paused rather
+    than the frozen PauseStart-based time used by the heartbeat.
+  - No full snapshot of button flags, debounce tables, active goals, or pending
+    button-triggered map work is stored in the shown savestate path.
+
+10. SERIALIZATION AND WHAT THE PLAYER CAN REPRODUCE
+=================================================
+Creator SaveRunToFile writes FE2T version 2, nominal FPS, frame count, author,
+name, and per-frame time, velocity, root transform, camera transform, and
+animation information (460-505). It does not write MapEvents, clone contents,
+button sequence/timings, preview offsets, or native task state.
+
+The supplied Player decodes those character frames and drives playback from
+its map-start clock (player:311-351; 502 onward). Therefore exporting a run
+does not preserve the Creator's offline environment rehearsal. Accurate
+character playback and accurate world replay are separate requirements.
+
+11. DESIGN CONSEQUENCES FOR FUTURE TOMATOTAS MAP SIMULATION
+=========================================================
+These are recommendations, not implemented changes or assumed user decisions.
+Full local map rewind remains deferred as requested.
+
+Retain the useful ideas: stable object identities, baseline state, explicit
+event ordering, reversible state deltas, and indexed seeking. Do not carry over
+the assumption that a live prepass plus native task spawning is deterministic.
+
+A future design should explicitly account for:
+  1. One simulation clock used by timeline scheduling, buttons, effects, and
+     savestates; separate presentation preview must not secretly mutate logic.
+  2. A local scheduler with serializable pending work, active sequences, repeat
+     counters, trigger/debounce state, and a stable same-tick ordering rule.
+  3. Local button activation records and causal trigger dispatch, independent
+     of server remotes and ordinary live-game callbacks.
+  4. Instance lifecycle and reference remapping: create/destroy/reparent plus
+     attributes, ValueBase state, and relevant constraints/liquid state.
+  5. A single owner for each simulated property, so native tasks and physics
+     cannot fight a seek result. Presentation effects need an explicit replay
+     policy, especially sounds, alerts, camera shake, and randomness.
+  6. Checkpoints plus deltas to bound seek costs; snapshot button and scheduler
+     state together with map state rather than only character frames.
+  7. Versioned world payloads or a verified map/program identity in saved runs.
+     Unsupported server-only behavior should be reported, not silently treated
+     as simulated. The missing server module is a genuine evidence boundary.
+
+Suggested later validation cases:
+  - Seek A -> B -> A restores identical supported world/button/scheduler state.
+  - Pause longer than a timeline duration: no simulated work advances.
+  - Branch before a button press: the discarded future cannot fire afterward.
+  - One-shot versus repeated touches and overlapping trigger parts.
+  - Two equal-time events targeting the same property.
+  - Dynamic object creation/destruction and reference restoration.
+  - WaterState transitions independently of visible water geometry.
+  - Headless execution: UI removal must not stop the simulation clock.
+  - Offline execution makes no timeline-related server requests.
+
+Bottom line
+===========
+The references are valuable for locating FE2's integration points and exposing
+why the old approach drifts. They do not contain a complete rewindable map
+runtime. MapEvents reproduces selected observed properties; native timelines
+run asynchronous game operations; cloned buttons mostly manage local flags and
+visual synchronization. A full solution must unify their state and causality,
+not simply combine those three legacy mechanisms unchanged.

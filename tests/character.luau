@@ -188,6 +188,48 @@ test("unavailable animation fails once without blocking valid tracks",function()
     assert(animator.loads==2 and #warnings==1 and c.tracks["good:1"])
     c:Destroy()
 end)
+
+test("animation weights above one survive capture and puppet playback",function()
+    local c,_,_,_,animator=setup()
+    local original=track("weighted"); original.WeightCurrent=5
+    animator.playing={original}
+    local f=c:Capture(0,cf())
+    assert(f.tracks[1].weight==5)
+    c:Apply(f,cf(),false)
+    assert(c.tracks["weighted:1"].WeightCurrent==5)
+    c:Destroy()
+end)
+
+test("failed animation occurrences do not retain unusable sibling tracks",function()
+    local c,_,_,_,animator=setup()
+    local load=animator.LoadAnimation
+    animator.LoadAnimation=function(self,animation)
+        if self.loads==1 then error("animator track limit") end
+        return load(self,animation)
+    end
+    local a={id="same",time=0,speed=1,weight=1,priority=2,looped=1}
+    c:Animations({a,a})
+    local previous=c.tracks["same:1"]
+    assert(previous and c.failedAnimations.same)
+    c:Animations({a,a})
+    assert(previous.destroyed and next(c.tracks)==nil)
+    c:Destroy()
+end)
+
+test("resume restores slide particles with recorded geometry and state",function()
+    local c,model,root,hum=setup()
+    local f=sample(c)
+    f.humanoid[1]=5
+    c:Apply(f,cf(),false)
+    c:Resume(f,cf())
+    assert(not root.Anchored and not model.children.Animate.Disabled)
+    assert(root.Size.Y==1 and hum.HipHeight==-1.5 and hum.state==states[5])
+    assert(root.children.SlideParticles.Enabled and c.flags[1]==1)
+    f.flags[1]=0
+    c:Resume(f,cf())
+    assert(not root.children.SlideParticles.Enabled)
+    c:Destroy()
+end)
 test("late hitbox and events are tracked and restored",function()
     local c,model=setup(false)
     local f=sample(c); c:Apply(f,cf(),false)
