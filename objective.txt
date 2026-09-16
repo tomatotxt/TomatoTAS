@@ -1,0 +1,163 @@
+Based on our entire conversation, your main objective is:
+
+To build a completely new, modular, and frame-perfect Tool-Assisted Speedrun
+(TAS) Engine (Creator & Player) for Flood Escape 2 that replaces older,
+monolithic, and fragile TAS scripts with a robust, direct state-overwrite
+("puppet") architecture.
+
+The Core Pillars of Your Objective:
+
+1. Deterministic "Puppet" Playback (Not Input Emulation):
+
+   - Eliminating physics desyncs by directly enforcing character CFrame,
+     velocity, humanoid states, and animation tracks frame-by-frame, rather
+     than hoping Roblox’s physics solver reproduces the run from raw
+     keypresses.
+
+2. Sub-Stud Spawn Accuracy (Accounting for Map Quirks):
+
+   - Eliminating the issue where runs desync at frame zero due to server
+     spawn randomization.
+   - Solving the moving spawn edge case by waiting until the spawn platform
+     settles completely (\Delta < 0.005 studs for a full 1.0s) before
+     capturing the exact relative transform (ToObjectSpace).
+
+3. Safe, Lag-Free Map Duplication:
+
+   - Cloning the live map into an isolated sandbox for offline recording and
+     playback.
+   - Using an optimized connection-stripper (getconnections on
+     GetPropertyChangedSignal("Archivable")) to neutralize FE2’s anti-tamper
+     traps without triggering sparse-array queue bugs or dropping the game
+     to 20 FPS.
+
+4. Compact, High-Performance Telemetry (.fe2tomatas):
+
+   - Storing dense runs in a native Luau buffer binary format.
+   - Using quaternions for rotational data to achieve 100% precision with
+     zero gimbal lock.
+   - Tying the entire recording and playback timeline to a unified relative
+     time baseline (T - T_0).
+
+5. Clean Modular Re-architecture:
+
+   - Stepping away from monolithic legacy scripts (like Creator V3.5 and Player V5.6) in favor of a clean, decoupled codebase designed from the ground up, ready to be engineered with your specialized AI.
+
+
+QUICK FACTS & ARCHITECTURAL DIRECTIVES
+
+1. Project Philosophy & Core Scope
+
+  - Direct State Overwrite ("Puppet"): The playback engine does not simulate
+    hardware keystrokes or virtual movement vectors; it authoritatively
+    overrides CFrame, AssemblyLinearVelocity, character geometry, and animation
+    tracks on PreSimulation to eliminate physics divergence.
+  - Pure Reference Legacy: FE2 TAS Creator V3.5 and TAS Player V5.6 are strictly
+    architectural reference artifacts. Their file formats, closures, and logic
+    flows can and should be redesigned into cleaner, more optimal
+    implementations.
+  - No Autofarm / Pre-Pass Phase: Recording is done directly through user
+    control and savestates. Do not generate an automated bot/autofarm traversal
+    phase.
+  - Zero-UI Interface (Headless / Keybind-Driven): Do not write or depend on any
+    UI libraries (e.g., uiapi.luau, Roact, ScreenGuis). All creator and playback
+    interactions must be handled strictly via hotkeys (UserInputService /
+    ContextActionService) to minimize overhead and focus 100% on engine
+    mechanics.
+
+2. Technical Directives & Map Mechanics
+
+A. Dynamic Spawn Settle & Offset Resolution
+
+  - The 1.0-Second Rule: In ~10% of maps, spawn platforms move at round start.
+    The engine must sample the spawn platform on Heartbeat and verify position
+    movement is static (\Delta \le 0.005\text{ studs}) continuously for a full
+    1.0 second before recording initial offsets, creating savestates, or
+    resetting the character.
+  - Sub-Stud Accuracy: Spawn offsets must be calculated in local object space:
+    \text{spawnOffsetCFrame} = \text{Spawn}_{\text{live}}.\text{CFrame}:\text{ToObjectSpace}(\text{Root}.\text{CFrame})
+    Applied at playback via:
+    \text{TargetCFrame} = \text{Spawn}_{\text{target}}.\text{CFrame} \times \text{spawnOffsetCFrame}
+  - In-Game Verification: Ensure the character is out of the lobby lift
+    (Vector3.new(-25, -144, 139)) by asserting
+    \text{distance} > 300\text{ studs}, HumanoidRootPart.Anchored == false, and
+    Humanoid.WalkSpeed >= 20.
+
+B. Anti-Tamper & Clean Cloning
+
+  - Connection-Stripper Fix: Neutralize FE2's Source 39 anti-tamper trap by
+    using getconnections(inst:GetPropertyChangedSignal("Archivable")) to
+    :Disable() / :Disconnect() all listeners before setting Archivable = true.
+  - Sparse Table Bug Prevention: In the batch queue, never set table elements to
+    nil while actively reading #Queue. Keep a dense, continuous array with a
+    sliding pointer index (QueueIndex += 1) to prevent #Queue from prematurely
+    evaluating to 0 in Luau.
+
+C. Zipline Continuity (UpdRopeData)
+
+  - Capture: When loading into the live map, listen to and cache the node array
+    sent via Remote.UpdRopeData.
+  - Injection: Cloned maps do not receive server network updates. After
+    character reset/respawn in the cloned map, restore the cached RopeTable into
+    FE2_Character's startZipline closure via upvalue injection:
+    setupvalue(startZiplineFunction, 2, CachedRopeTable)
+
+D. Branching TAS Architecture (Map Variants)
+
+  - Some FE2 maps feature multiple routes, alternate puzzle paths, or random
+    button variants.
+  - The recording and savestate data model must support a Tree/Branching
+    Structure (parent-child frame nodes) rather than a rigid flat array,
+    allowing users to fork runs into distinct variant branches from any
+    arbitrary frame.
+
+E. Mechanics & Metamethod Spoofing
+
+  - Slide Geometry: Sync HumanoidRootPart.Size and FE2_Hitbox.Size to (2, 1, 1),
+    set Humanoid.HipHeight = -1.5, fire Animate.Sliding:Fire(true), and toggle
+    SlideParticles.
+  - Swing/Zipline State: Force
+    Humanoid:ChangeState(Enum.HumanoidStateType.Physics) and fire
+    Animate.Swinging:Fire(true).
+  - MoveDirection Emulation: Hook __index on Humanoid.MoveDirection during
+    playback to spoof targetVelocity.Unit so stock animation blend trees run
+    naturally.
+  - Anti-Cheat Neutralization: Disable Character.CL_AntiSideClip and
+    Character.CL_AirMomentum.
+  - Lift Unfreeze: Invoke Remote.RemoveWaiting:FireServer() post-respawn.
+
+3. Phased Implementation Strategy
+
+When directing the AI to generate the codebase, prompt it to build the system
+incrementally in the following order:
+
+1.  Phase 1: Architecture, Type Definitions & Tree Model
+      - Define Luau types, the branching state tree data structure, and the
+        overall module layout.
+2.  Phase 2: Serialization & Binary IO Engine
+      - Native Luau buffer implementation, unit quaternion encoder/decoder, and
+        tree-branching binary serialization.
+3.  Phase 3: Lifecycle, Clone Fix & Settle Engine
+      - Dense-queue getconnections connection stripper, event-driven map
+        handshake, and the 1.0s spawn stabilization watcher.
+4.  Phase 4: Headless Creator Module (Keybind-Driven)
+      - Frame-by-frame snapshot recorder, branching state-history buffer,
+        keybind action router, and UpdRopeData cache/restore pipeline.
+5.  Phase 5: Puppet Playback Engine
+      - Dual-loop execution (PreSimulation kinematics vs. RenderStepped
+        telemetry), MoveDirection spoofing, and custom character mechanics
+        synchronization.
+
+
+CURRENT IMPLEMENTATION SCOPE (USER CLARIFICATION)
+
+  - Assume an executor providing all required UNC/sUNC capabilities.
+  - Shared GitHub loader configuration: owner tomatotxt, branch live,
+    repository TomatoTAS. Load runtime modules through
+    loadstring and game:HttpGet using that shared configuration.
+  - Full map-state savestates and local world simulation are deferred until
+    the user specifies the desired behavior. Implement the remaining engine
+    now; character-only marks must clearly identify this limitation.
+  - Quaternion storage is preferred; tiny floating-point differences are
+    acceptable. Do not claim mathematically exact or server-deterministic
+    playback.

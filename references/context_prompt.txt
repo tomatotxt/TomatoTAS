@@ -1,0 +1,354 @@
+Here is a complete, all-in-one technical reference document. It consolidates all
+the reverse-engineered FE2 client logic, the anti-tamper bypass, the map
+lifecycle handling, the dynamic spawn stabilization, the synchronization
+mechanics, and the binary format.
+
+You can copy and paste this entire block directly into your next AI session as
+your master context.
+
+MASTER REFERENCE & TECHNICAL CONTEXT: FLOOD ESCAPE 2 MODULAR TAS ENGINE
+
+1. Project Objective & Core Philosophy
+
+The objective is to design a clean, modular Tool-Assisted Speedrun (TAS) Engine
+(Creator & Player) for Flood Escape 2 (FE2) on Roblox (Luau).
+
+The "Puppet" Paradigm (Direct State Overwrite)
+
+Traditional TAS engines rely on input injection (moveVector, virtual keystrokes)
+and expect the physics engine to deterministically reproduce trajectories. In
+Roblox—and specifically in FE2—this fails due to:
+
+  - Distributed physics solver non-determinism across varying frame deltas
+    (deltaTime).
+  - Client-side character raycasts (scanWalljumps, SlideBeam detection)
+    evaluating at slightly different spatial intervals.
+  - Network and round timer latency (workspace.ServerTime.Value).
+
+Engine Rule: This TAS engine operates via Direct State Overwrite. During
+playback, the client character acts as a telemetry puppet: CFrame,
+AssemblyLinearVelocity, character collision geometry, hip height, and animations
+are strictly enforced frame-by-frame from a recorded stream. Input and engine
+properties (such as MoveDirection) are virtualized/spoofed so game scripts and
+procedural animations evaluate naturally without fighting the playback.
+
+2. Reverse-Engineered FE2 Client Internals
+
+From source code analysis of the FE2 client scripts, the following subsystems
+directly impact recording and playback:
+
+A. Character Controller & Custom Mechanics (FE2_Character)
+
+  - Sliding:
+      - Triggered via runSlide().
+      - Shrinks HumanoidRootPart.Size from Vector3.new(2, 2, 1) to
+        Vector3.new(2, 1, 1).
+      - Matches FE2_Hitbox.Size to Vector3.new(2, 1, 1).
+      - Lowers Humanoid.HipHeight from 0 to -1.5.
+      - Signals the character animator via Animate.Sliding:Fire(true/false).
+      - Toggles HumanoidRootPart.SlideParticles.Enabled.
+  - Walljumping:
+      - Runs a continuous loop (scanWalljumps()) raycasting 2 studs forward
+        searching for parts with an ObjectValue named _Wall.
+      - When triggered, binds an internal jump action via
+        ContextActionService:BindAction("DoWalljump", ...), creates a weld
+        WalljumpWeld_Live between the character and the wall, disables standard
+        humanoid states, and fires Animate.Walljump:Fire(true/false).
+  - Ziplines / Swinging:
+      - Triggered when FE2Hitbox touches a part named RopeStart.
+      - Fires network remotes (Remote.Challenges.RideZipline,
+        Remote.Gameplay.Zipline).
+      - Changes humanoid state to Enum.HumanoidStateType.Physics.
+      - Signals animator via Animate.Swinging:Fire(true/false).
+      - Traverses an array of node positions (RopeTable.positions) using
+        BodyPosition.
+
+B. Core Game Loop & Liquid Mechanics (CL_MAIN_GameScript)
+
+  - Liquid Detection:
+      - Evaluates whether the camera and character root are inside fluid parts
+        via spatial checks (inPQ, inPS) on parts tagged _Water.
+      - Character immersion toggles internal flags (v38 = immersion, v39 =
+        swimming active).
+      - Liquid materials vary ("water", "acid", "lava"), modifying air drain
+        rates (v43 base air, v41 tank air, v44 acid penalty).
+      - Applies vertical swimming control via a BodyVelocity named SwimVel
+        inside HumanoidRootPart.
+  - Client Anti-Cheat Scripts:
+      - CL_AntiSideClip: Raycasts backward from current position to previous
+        position against workspace.Multiplayer. If an anchored collidable
+        barrier was bypassed, it snaps the player back. Must be disabled during
+        TAS playback.
+      - CL_AirMomentum: Caps horizontal velocity. Must be disabled during TAS
+        playback.
+
+C. Animation Subsystem (Animate)
+
+  - The character’s stock animation controller exposes its environment through
+    getsenv(character.Animate).
+  - Key functions: playAnimation(name, transitionTime, humanoid) and
+    setAnimationSpeed(speed).
+  - Feeds walking/running blend trees and lean angles from
+    Humanoid.MoveDirection. When directly overwriting position, MoveDirection
+    drops to (0, 0, 0) unless hooked.
+
+D. Security & Integrity Traps (Source 39)
+
+  - An obfuscated client script monitors descendants of workspace.Multiplayer.
+  - It binds listeners to inst:GetPropertyChangedSignal("Archivable").
+  - The Trap: If any non-game script sets Archivable = true to clone the map
+    while these listeners are connected, the listener detects the change and
+    triggers a recursive, infinite cloning loop (script:Clone().Parent = arg3;
+    arg3:Clone().Parent = arg3), dropping the client to 15–20 FPS or crashing
+    the process.
+
+3. Map Lifecycle & Cloning Architecture
+
+A. The Safe "Archivable" Connection-Stripper
+
+To safely clone workspace.Multiplayer.Map, the engine must locate and disconnect
+the anti-tamper signal listeners before setting Archivable = true.
+
+Critical Bug to Avoid: Do not set processed elements to nil in an active table
+(Queue[QueueIndex] = nil). In Luau, setting leading elements to nil creates a
+sparse array where the length operator (#Queue) prematurely returns 0. This
+causes queue flushing to exit after 1 frame, leaving 99% of the map protected by
+the anti-tamper and tripping the lag crash.
+
+-- CORRECT BATCH CONNECTION-STRIPPER
+local Queue = {}
+local QueueIndex = 1
+local Queued = {}
+
+local function QueueInstance(inst)
+    if Queued[inst] then return end
+    Queued[inst] = true
+    table.insert(Queue, inst)
+end
+
+local function RemoveCheck(inst)
+    if not inst.Parent then return end
+    local success, connections = pcall(function()
+        return getconnections(inst:GetPropertyChangedSignal("Archivable"))
+    end)
+    if success and connections then
+        for _, conn in ipairs(connections) do
+            pcall(function()
+                if conn.Disable then conn:Disable()
+                elseif conn.Disconnect then conn:Disconnect() end
+            end)
+        end
+    end
+    pcall(function() inst.Archivable = true end)
+end
+
+-- Process continuously using an incrementing index pointer:
+local function FlushTargetSynchronous(targetModel)
+    for _, desc in ipairs(targetModel:GetDescendants()) do
+        RemoveCheck(desc)
+    end
+    RemoveCheck(targetModel)
+end
+
+B. Map Arrival Handshake (Event-Driven)
+
+FE2 loads maps by first creating a container called "NewMap" inside
+workspace.Multiplayer, streaming assets/descendants, and then renaming the model
+to "Map" once preloading is complete.
+
+Pattern: Never busy-poll with task.wait() loops. Use event-driven signals:
+
+local liveMap = Multiplayer:WaitForChild("NewMap", 9999)
+if liveMap.Name ~= "Map" then
+    repeat
+        liveMap:GetPropertyChangedSignal("Name"):Wait()
+    until liveMap.Name == "Map"
+end
+
+C. In-Game Physical Presence Verification
+
+FE2 lobby elevators are located at Vector3.new(-25, -144, 139). The script must
+verify the character has actually left the lift and entered the active map
+before recording:
+
+  - Distance from lobby lift > 300 studs.
+  - HumanoidRootPart.Anchored == false.
+  - Humanoid.WalkSpeed >= 20.
+
+4. Dynamic Spawn Settle & Offset Mathematics
+
+A. The 10% Dynamic Spawn Edge Case
+
+In ~90% of FE2 maps, spawn platforms are static. In the remaining ~10%, spawn
+platforms move (e.g., elevators, dropping floors, mechanical sequences).
+
+  - The Problem: If a snapshot or reset occurs while the spawn is in motion, the
+    recorded offset will be invalid once the platform finishes moving.
+  - The Solution: The engine must sample spawnPart.Position on
+    RunService.Heartbeat. The platform must remain stationary within an epsilon
+    threshold (\le 0.005 studs) continuously for a full 1.0 second before
+    offsets are computed or character resets occur.
+
+local function WaitForSpawnToSettle(spawnPart)
+    local SETTLE_THRESHOLD = 1.0
+    local EPSILON = 0.005
+    local lastPos = spawnPart.Position
+    local timeAtRest = 0
+    local lastTick = os.clock()
+    
+    while timeAtRest < SETTLE_THRESHOLD do
+        RunService.Heartbeat:Wait()
+        local now = os.clock()
+        local dt = now - lastTick
+        lastTick = now
+        
+        local currentPos = spawnPart.Position
+        if (currentPos - lastPos).Magnitude > EPSILON then
+            timeAtRest = 0
+            lastPos = currentPos
+        else
+            timeAtRest += dt
+        end
+    end
+end
+
+B. Sub-Stud Spawn Offset Math
+
+FE2 servers spawn players at randomized points across the spawn platform
+surface. To ensure runs start identically:
+
+1.  Record: Calculate the character's transform relative to the spawn platform's
+    local space:
+    \text{spawnOffsetCFrame} = \text{Spawn}_{\text{live}}.\text{CFrame}:\text{ToObjectSpace}(\text{Root}.\text{CFrame})
+2.  Replay: Apply the relative matrix to the target spawn:
+    \text{TargetCFrame} = \text{Spawn}_{\text{target}}.\text{CFrame} \times \text{spawnOffsetCFrame}
+
+5. Telemetry Capture & Binary Format (.fe2tomatas)
+
+To prevent multi-megabyte JSON files and garbage collection spikes, TAS runs are
+serialized to a compact binary format using Luau's buffer library and
+string.pack.
+
+A. Quaternion Conversion (Zero Gimbal Lock)
+
+Instead of 3 Euler angles (susceptible to gimbal lock) or 9 rotation matrix
+floats, orientations are stored as unit quaternions (q_x, q_y, q_z, q_w):
+
+local function CFrameToQuaternion(cf)
+    local _, _, _, m00, m01, m02, m10, m11, m12, m20, m21, m22 = cf:GetComponents()
+    local trace = m00 + m11 + m22
+    local qx, qy, qz, qw
+    if trace > 0 then
+        local s = math.sqrt(trace + 1.0) * 2
+        qw = 0.25 * s; qx = (m21 - m12) / s; qy = (m02 - m20) / s; qz = (m10 - m01) / s
+    elseif (m00 > m11) and (m00 > m22) then
+        local s = math.sqrt(1.0 + m00 - m11 - m22) * 2
+        qw = (m21 - m12) / s; qx = 0.25 * s; qy = (m01 + m10) / s; qz = (m02 + m20) / s
+    elseif m11 > m22 then
+        local s = math.sqrt(1.0 + m11 - m00 - m22) * 2
+        qw = (m02 - m20) / s; qx = (m01 + m10) / s; qz = (m12 + m21) / s
+    else
+        local s = math.sqrt(1.0 + m22 - m00 - m11) * 2
+        qw = (m10 - m01) / s; qx = (m02 + m20) / s; qy = (m12 + m21) / s
+    end
+    return qx, qy, qz, qw
+end
+
+local function QuaternionToCFrame(pos, qx, qy, qz, qw)
+    local xx, yy, zz = qx * qx, qy * qy, qz * qz
+    local xy, xz, xw = qx * qy, qx * qz, qx * qw
+    local yz, yw, zw = qy * qz, qy * qw, qz * qw
+    
+    local r00 = 1 - 2 * (yy + zz)
+    local r01 = 2 * (xy - zw)
+    local r02 = 2 * (xz + yw)
+    local r10 = 2 * (xy + zw)
+    local r11 = 1 - 2 * (xx + zz)
+    local r12 = 2 * (yz - xw)
+    local r20 = 2 * (xz - yw)
+    local r21 = 2 * (yz + xw)
+    local r22 = 1 - 2 * (xx + yy)
+    
+    return CFrame.new(pos.X, pos.Y, pos.Z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+end
+
+B. Binary Schema Layout
+
+  - Header Structure:
+      - Magic: 4 Bytes ASCII ("FE2T")
+      - Version: 1 Byte uint8 (2)
+      - TargetFPS: 1 Byte uint8 (60)
+      - TotalFrames: 4 Bytes uint32
+      - Author: Length-prefixed string (2 bytes length + UTF-8 payload)
+      - MapName: Length-prefixed string (2 bytes length + UTF-8 payload)
+  - Frame Struct Layout ("d" .. string.rep("f", 18) .. "s"):
+      - Timestamp: float64 (d, 8 bytes) relative to run start (T_0).
+      - Velocity: 3 \times \text{float32} (fff, 12 bytes).
+      - RootTransform: 3 \times \text{float32} (Pos) + 4 \times \text{float32}
+        (Quat) (28 bytes).
+      - CameraTransform: 3 \times \text{float32} (Pos) + 4 \times \text{float32}
+        (Quat) (28 bytes).
+      - AnimSpeed: 1 \times \text{float32} (f, 4 bytes).
+      - AnimName: Length-prefixed Pascal string (s, 2-byte length + string).
+
+6. Execution & Playback Pipeline
+
+A. Dual-Stage Execution Loop
+
+To prevent UI updates from lagging physics calculations:
+
+1.  RunService.PreSimulation (Physics & State Injection):
+      - Computes normalized time:
+        \text{Elapsed} = (\text{os.clock}() - T_0) \times \text{TimeModifier}.
+      - Locates bounding frames F_A and F_B.
+      - Computes lerp alpha: \alpha = \frac{\text{Elapsed} - T_A}{T_B - T_A}.
+      - Directly sets RootPart.CFrame = Lerp(F_A.CFrame, F_B.CFrame, \alpha) +
+        MapOffset.
+      - Directly sets RootPart.AssemblyLinearVelocity = Lerp(F_A.Vel, F_B.Vel,
+        \alpha).
+      - Synchronizes slide/swing geometry and fires animation tracks.
+2.  RunService.RenderStepped (Telemetry & Visuals):
+      - Updates HUD labels (time, frame count, percentage).
+      - Renders predictive path lines and world visuals.
+
+B. Emulation Hooks During Playback
+
+  - MoveDirection Spoof:
+    local oldIndex
+    oldIndex = hookmetamethod(game, "__index", function(self, key)
+        if getgenv().IsTASPlaying and key == "MoveDirection" then
+            if typeof(self) == "Instance" and self:IsA("Humanoid") and self.Parent == LocalPlayer.Character then
+                local targetVel = getgenv().TASCurrentMoveDir
+                return typeof(targetVel) == "Vector3" and targetVel or Vector3.zero
+            end
+        end
+        return oldIndex(self, key)
+    end)
+    (Feeds targetVelocity.Unit into MoveDirection so FE2's Animate script
+    calculates running blend animations naturally).
+  - Animation Isolation: Hook Animate.playAnimation via getsenv() to bypass
+    ambient character controller interference, only changing tracks when the
+    recorded state machine changes states.
+  - Anti-Cheat Neutralization: Set .Disabled = true on Character.CL_AntiSideClip
+    and Character.CL_AirMomentum.
+  - Lobby State Release: Call
+    ReplicatedStorage.Remote.RemoveWaiting:FireServer() immediately after
+    respawning to release the server's waiting-area camera freeze.
+
+7. Directives for the Next AI
+
+When designing the new codebase:
+
+1.  Keep it Modular & Pragmatic: Structure modules logically around
+    functionality (e.g., map lifecycle, connection stripping, kinematics,
+    recording, playback, serialization) without forcing arbitrary naming
+    conventions.
+2.  Adhere to the State-Overwrite Philosophy: Do not attempt to emulate keyboard
+    presses for standard running or jumping; write directly to transforms,
+    velocities, and custom FE2 character variables.
+3.  Respect Engine Lifecycle Signals: Use GetPropertyChangedSignal for map
+    container arrival, PreSimulation for kinematic overrides, and Heartbeat for
+    stability checks.
+4.  Preserve Sub-Stud Precision: Always resolve spawn platform offsets using
+    object-space CFrame math after the spawn has settled for at least 1.0
+    second.

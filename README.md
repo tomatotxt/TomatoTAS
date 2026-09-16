@@ -1,0 +1,195 @@
+# TomatoTAS
+
+Modular, headless Flood Escape 2 character TAS Creator and Player for an executor
+providing UNC/sUNC APIs. This is a new implementation; the files in `references/`
+are research inputs, not runtime dependencies.
+
+**Status:** implemented and locally tested core/controller; FE2 integration still
+requires in-game testing. Full map simulation and world savestates are deliberately
+deferred. Character marks do not rewind buttons, fluids, platforms, server timers,
+or hidden game-script variables. No autofarm is included.
+
+## GitHub setup
+
+Upload this directory's contents to the **root** of your repository on the `live`
+branch. The default repository is `tomatotxt/TomatoTAS`. All modules use one configuration
+and are fetched with `loadstring(game:HttpGet(...))` through the shared importer.
+No ModuleScript `require` is used at runtime.
+
+```lua
+getgenv().TomatoTASConfig = {
+    Owner = "tomatotxt",
+    Repo = "TomatoTAS",
+    Branch = "live",
+    Directory = "TomatoTAS", -- executor-relative save folder
+    File = "run",            -- default F6/F7 filename, without extension
+}
+local c = getgenv().TomatoTASConfig
+loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/" .. c.Owner .. "/" .. c.Repo .. "/" .. c.Branch .. "/loader.luau",
+    true
+))()
+```
+
+The importer snapshots configuration, caches modules per launch, rejects circular
+dependencies and invalid/missing source, and includes module paths in errors.
+Rerun the loader to fetch updates. For reproducible runs, `Branch` can instead be a
+commit SHA. A moving branch can change between HTTP requests; a SHA avoids mixing
+revisions. GitHub publication is not performed by this local build.
+
+The local folder is initialized as a Git repository on `live`. Open this folder
+in VS Code, commit the files in Source Control, then choose **Publish Branch**
+to create `TomatoTAS` on GitHub. Choose public visibility for unauthenticated raw
+HTTP loading. No remote is preconfigured, so VS Code can handle publication.
+
+## First run
+
+1. Load the tool before a new FE2 round when possible, so it captures zipline data.
+2. Stand on the map's spawn platform and press **F1**. Preparation verifies you
+   have left the lobby, finds the spawn, and waits for one continuous second of
+   stability. Small movements accumulate against the start of the stable interval.
+3. For a static local clone, press **F8**. This prepares a clone and respawns you
+   onto its settled spawn. It does not simulate server-controlled map mechanics.
+   Clone creation may take time on large maps; do not change rounds during it.
+4. Press **F2** to record your own movement, then **F2** to pause.
+5. Use **F4/F5** for a character mark/restore, **F10** for a single physics step,
+   and **F2** to continue recording a new branch.
+6. Press **F6** to save, **F3** to replay, and **F9** to release character control.
+
+The first frame stores the exact character transform relative to the settled
+spawn. Target-map playback applies that same relative transform, eliminating the
+recorded spawn's random world offset. Prepare the target map before playback;
+map name and spawn path must match the run.
+
+## Controls
+
+| Key | Action |
+| --- | --- |
+| F1 | Prepare current live map and character |
+| F2 | Record / pause recording |
+| F3 | Play selected branch / pause playback |
+| F4 | Save character mark `quick` and pause |
+| F5 | Restore character mark `quick` |
+| F6 | Save configured run file |
+| F7 | Load configured run file |
+| F8 | Clone prepared map, respawn and restore zipline data |
+| F9 | Stop and release control |
+| F10 | Advance and record one simulation frame while paused |
+| `[` / `]` | Previous / next recorded frame on selected branch |
+| `\` | Cycle branch tips |
+| End | Unload and clean up |
+
+Hotkeys are ignored while typing. During map operations, F9 cancels and End unloads;
+other hotkeys wait until the operation finishes. Console
+messages report errors and status; no UI libraries or ScreenGuis are used.
+
+## Script API
+
+```lua
+local tas = getgenv().TomatoTAS
+tas:NewRun()                  -- explicitly replace in-memory run; save first
+tas:Record()
+tas:Pause()
+tas:Mark("before_jump")       -- CHARACTER ONLY
+tas:Restore("before_jump")
+tas:Seek(120)                 -- global tree node ID, not branch-relative index
+tas:Play(240, "frames")       -- exact samples, one stored frame per simulation callback
+tas:Play(240, "time")         -- interpolate by recorded relative simulation time
+tas:SetSpeed(0.5)             -- time playback only; does not slow Roblox physics
+tas:Save("practice")
+tas:Load("practice")
+print(tas:Status())
+print(tas:ListFiles())
+tas:Stop()
+tas:Destroy()
+```
+
+For yielding commands, use `tas:Command(function() tas:Prepare() end)` or the hotkeys
+to serialize user actions. The API is intended for sequential use, not concurrent
+calls from multiple scripts. `tas.camera = false` before playback disables camera
+takeover. `tas:RestoreWorld()` explicitly errors until world simulation exists.
+
+## Modules
+
+| Module | Responsibility |
+| --- | --- |
+| `loader.luau` | Shared GitHub configuration, HTTP loading and dependency cache |
+| `src/App.luau` | Creator/Player modes, hotkeys, frame events, branches and marks |
+| `src/core/Tree.luau` | Parent-linked frame history; old futures remain intact |
+| `src/core/Quaternion.luau` | Normalized matrix conversion and shortest-path SLERP |
+| `src/core/Sampling.luau` | Binary-search playback sampling and interpolation |
+| `src/core/Codec.luau` | Bounded binary encoding, validation and checksum |
+| `src/core/Scope.luau` | Connection/resource lifetime management |
+| `src/runtime/Character.luau` | Character capture, puppet enforcement and restoration |
+| `src/runtime/Map.luau` | Map arrival, spawn settle, reversible clone preparation, ropes |
+| `src/runtime/Storage.luau` | Verified file saves, backups and loading |
+| `src/Types.luau` | Shared data shapes and future world-provider contract |
+
+## Recording and playback behavior
+
+Recording samples `PostSimulation`, using accumulated simulation deltas as the
+relative timeline. It records actual completed frames rather than inventing 60 Hz
+samples when the client runs slower. Frame zero is captured when recording starts.
+Playback applies character state on `PreSimulation`; camera playback uses
+`RenderStepped`. These phases follow the [Roblox scheduler documentation](https://create.roblox.com/docs/reference/engine/classes/RunService).
+
+Captured state includes root and camera transforms, linear/angular velocity,
+root/hitbox dimensions, hip height, humanoid state and movement parameters,
+slide/swing/walljump event flags, and active animation IDs, times, weights,
+speeds, priorities and looping flags. Recorded health is telemetry only; playback
+does not overwrite server-owned health. Transform positions and quaternions use
+64-bit floats in the file to avoid additional float32 quantization.
+
+Time mode interpolates position, velocity, orientation and compatible animation
+positions. Discrete mechanics switch at sample boundaries. Frame mode visits every
+stored sample once; its wall-clock speed depends on the playback client's frame
+rate. Neither mode can guarantee server-side outcomes or exact touch-event timing.
+
+Puppet mode anchors the root so physics cannot integrate it beyond the recorded
+sample. Character controller and animation scripts are temporarily disabled;
+captured animation tracks are directly positioned. A scoped MoveDirection override
+returns normalized target velocity. Stopping restores script states, geometry,
+camera and movement settings. The shared metamethod hook remains installed but
+inactive, avoiding unsafe removal of hooks belonging to other tools.
+
+Continuing from a character mark restores recorded pose, velocity, geometry and
+public humanoid state, but restarting FE2's controller does not reconstruct its
+private walljump/zipline/swim state machines. Test resumes around these mechanics
+in-game; this is distinct from direct puppet playback, which replays their recorded
+visible state. Cached zipline data is re-injected for cloned recording.
+
+## Clone behavior and limitations
+
+Preparation disables Archivable listeners before changing Archivable, processes
+a dense array in batches, and restores original properties/listeners afterward.
+It refuses listeners that cannot be reversibly disabled. Cloning itself is a
+synchronous Roblox operation and can still briefly stall on a large map.
+
+The sandbox preserves world coordinates for zipline nodes. The live map is moved
+locally to ReplicatedStorage while the clone occupies its position; unloading
+restores it if it still exists. Clone scripts are disabled. The clone is a static
+snapshot of the moment it was copied, not a reconstructed map at round start.
+Server-controlled mechanics, client scripts that assume `workspace.Multiplayer.Map`,
+and game updates can affect sandbox behavior. Test this integration before relying
+on a run. No server scripts are copied or simulated.
+
+## Tests
+
+With the official [Luau CLI tools](https://github.com/luau-lang/luau/releases) on PATH:
+
+```powershell
+luau tests/core.luau
+luau tests/controller.luau
+luau tests/map.luau
+Get-ChildItem src -Recurse -Filter *.luau | ForEach-Object { luau-compile --null $_.FullName }
+luau-compile --null loader.luau
+```
+
+Core tests cover rotation conversion, interpolation, branching, timestamps,
+binary roundtrips, corruption/truncation, and a 10,000-node history. Controller
+tests use service doubles to cover recording, character marks, stepping, playback,
+new runs, failure handling and unload. Clone tests check batching, cancellation,
+and restoration of source properties/listeners after success and failure.
+They do not validate Roblox engine behavior
+or executor compatibility. See `docs/VALIDATION.md` for the in-game acceptance plan
+and `docs/FORMAT.md` for the file schema.

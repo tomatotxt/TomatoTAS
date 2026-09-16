@@ -1,0 +1,5 @@
+*.fe2tomatas
+*.fe2tomatas.bak
+*.fe2tomatas.pending
+.DS_Store
+Thumbs.db
