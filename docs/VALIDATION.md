@@ -24,8 +24,11 @@
   URLs, module caching, bad responses, dependency cycles, rejected configuration,
   and preserving a previous session when validation fails.
 
-Current local result: **17 Luau files compile; 90 tests pass** (25 core,
-24 controller, 14 map, 10 character, 10 storage, 7 loader).
+Current local result: **20 Luau files compile; 103 tests pass** (25 core,
+26 controller, 14 map, 10 character, 10 storage, 8 loader, 10 GUI).
+GUI tests use native-widget doubles to check construction, responsive scaling,
+disabled actions, timeline selection, file/branch wiring, minimization and cleanup.
+They do not render the interface in Roblox; in-game visual validation is pending.
 Controller coverage includes empty/single-branch hotkeys, branch cycling,
 custom keybind validation, preserving recording after failed file operations,
 map removal, cancellation and waiting for a fresh physics boundary when stepping.
@@ -62,6 +65,11 @@ Run these checks using the intended executor after publishing the repository:
    restoration after clone respawn. Verify no previous-map rope table is injected.
 10. Interrupt a file save and verify the `.bak`/`.pending` recovery files. Load
     a corrupted, truncated, wrong-map or unsupported-version file and verify rejection.
+11. Inspect GUI layout at desktop and small viewport sizes, drag to each edge,
+    minimize/reopen it, edit text fields and respawn. Verify no clipped controls,
+    unintended hotkeys while typing, or orphaned screens after reload/unload.
+    Try Studio transport, named marks, both replay modes, branch selection,
+    timeline seeking, file selection and recovery buttons in a live client.
 
 These checks need an actual Roblox client. Local compilation and mocked controller
 tests do not establish frame-perfect server outcomes or compatibility with every map.

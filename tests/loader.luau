@@ -5,7 +5,7 @@ local function run(config,fixtures,options)
     options=options or {}
     local requests,events={},{}
     local previous={Destroy=function() table.insert(events,"destroy") end}
-    local nextApp={name="new"}
+    local nextApp={name="new",scope={Add=function() end}}
     local shared={TomatoTASConfig=config,TomatoTAS=previous}
     local environment
     environment=setmetatable({
@@ -15,10 +15,12 @@ local function run(config,fixtures,options)
             table.insert(requests,url)
             local name=url:match("/src/(.+)%.luau$")
             local body=fixtures[name]
+            if name=="ui/Panel" and body==nil then body="return function() return {new=function() return {Destroy=function() end} end} end" end
             assert(body,"HTTP 404: "..url)
             return body
         end},
         print=function() end,
+        warn=function() end,
         onValidate=function()
             table.insert(events,"validate")
             if options.invalid then error("capability validation failed") end
@@ -53,7 +55,7 @@ test("owner repo and branch are shared by every cached module",function()
         return {Validate=onValidate,new=onNew}
     end]], ["core/Example"]="return function() return {} end"}
     local r=run(config,fixture,{inspectConfig=function(snapshot) assert(snapshot~=config and snapshot.Timeout==12) end})
-    assert(r.ok and #r.requests==2)
+    assert(r.ok and #r.requests==3)
     local prefix="https://raw.githubusercontent.com/other/other-repo/feature/example/src/"
     for _,url in ipairs(r.requests) do assert(url:sub(1,#prefix)==prefix) end
 end)
@@ -85,5 +87,11 @@ end)
 test("invalid module paths never issue an extra HTTP request",function()
     local r=run(nil,{App='return function(import) return import("../outside") end'})
     assert(not r.ok and #r.requests==1 and #r.events==0)
+end)
+test("GUI is optional and presentation failure preserves the engine",function()
+    local headless=run({GUI=false},{App=appSource})
+    assert(headless.ok and #headless.requests==1 and not headless.nextApp.gui)
+    local broken=run(nil,{App=appSource,["ui/Panel"]="return function() error('GUI failed') end"})
+    assert(broken.ok and broken.shared.TomatoTAS==broken.nextApp)
 end)
 print("Loader tests passed: "..count)

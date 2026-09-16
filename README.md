@@ -1,6 +1,6 @@
 # TomatoTAS
 
-Modular, headless Flood Escape 2 character TAS Creator and Player for an executor
+Modular Flood Escape 2 character TAS Creator and Player with a native GUI and hotkeys for an executor
 providing UNC/sUNC APIs. This is a new implementation; the files in `references/`
 are research inputs, not runtime dependencies.
 
@@ -24,6 +24,7 @@ getgenv().TomatoTASConfig = {
     Branch = "live",
     Directory = "TomatoTAS", -- executor-relative save folder
     File = "run",            -- default F6/F7 filename, without extension
+    GUI = true,              -- false keeps the hotkey-only interface
 }
 local c = getgenv().TomatoTASConfig
 loadstring(game:HttpGet(
@@ -45,6 +46,28 @@ to create `TomatoTAS` on GitHub. Choose public visibility for unauthenticated ra
 HTTP loading. No remote is preconfigured, so VS Code can handle publication.
 
 ## First run
+
+The GUI opens automatically. Drag its header to reposition it, use **Hide** to
+collapse it to a launcher, or **×** to unload the tool and release character control.
+The window scales to the available screen area and persists across respawns.
+
+- **Studio:** record, play, stop, prepare/clone, step frames, save named character
+  marks, choose replay mode/speed, and toggle camera playback.
+- **Branches:** select a continuation and inspect its final frame. The latest 60
+  tips appear in the list; the branch-cycle hotkey can still reach every tip.
+- **Files:** select or name a run, save/load it, and explicitly load backup or
+  pending recovery files. Saving/loading through the GUI updates the default run
+  name used by F6/F7.
+
+Click the timeline to seek a stored frame after pausing recording. Seeking uses
+recorded timestamps. Disabled controls explain their requirements in the status
+bar when hovered. **New run** asks for a second click within four seconds before
+replacing an existing in-memory run; save it first.
+
+GUI updates run at 10 Hz, separately from the simulation callbacks. Presentation
+errors remove the panel but leave the engine/hotkeys operational. Reload to reopen
+the panel, or set `GUI = false` to run without it. No third-party UI library or
+remote image assets are required.
 
 1. Load the tool before a new FE2 round when possible, so it captures zipline data.
 2. Stand on the map's spawn platform and press **F1**. Preparation verifies you
@@ -83,7 +106,7 @@ map name and spawn path must match the run.
 
 Hotkeys are ignored while typing. During map operations, F9 cancels and End unloads;
 other hotkeys are ignored until the operation finishes. Console
-messages report errors and status; no UI libraries or ScreenGuis are used.
+messages report errors and status, which also appear in the GUI's status bar.
 Unavailable actions display guidance without changing character control. A failed
 save or load also leaves an ongoing recording or playback active.
 
@@ -159,6 +182,8 @@ second full frame history, reducing peak memory during backup checks.
 | `src/runtime/Map.luau` | Map arrival, spawn settle, reversible clone preparation, ropes |
 | `src/runtime/Storage.luau` | Verified file saves, backups and loading |
 | `src/Types.luau` | Shared data shapes and future world-provider contract |
+| `src/ui/Panel.luau` | Independent native GUI, action wiring and widget lifetime |
+| `src/ui/Model.luau` | Time formatting, file naming, timeline selection and display state |
 
 ## Recording and playback behavior
 

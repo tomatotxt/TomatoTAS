@@ -58,5 +58,13 @@ App.Validate()
 if env.TomatoTAS then env.TomatoTAS:Destroy() end
 local app = App.new()
 env.TomatoTAS = app
+if config.GUI~=false then
+    local ok,err=pcall(function()
+        local panel=import("ui/Panel").new(app)
+        if app.scope.dead then panel:Destroy()
+        else app.scope:Add(panel); app.gui=panel end
+    end)
+    if not ok then warn("[TomatoTAS] GUI unavailable; hotkeys remain active: "..tostring(err)) end
+end
 print("[TomatoTAS] Ready. F1 prepare live map; F2 record/pause; F3 play/pause; F8 clone. See README for all controls.")
 return app

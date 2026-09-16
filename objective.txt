@@ -59,11 +59,10 @@ QUICK FACTS & ARCHITECTURAL DIRECTIVES
   - No Autofarm / Pre-Pass Phase: Recording is done directly through user
     control and savestates. Do not generate an automated bot/autofarm traversal
     phase.
-  - Zero-UI Interface (Headless / Keybind-Driven): Do not write or depend on any
-    UI libraries (e.g., uiapi.luau, Roact, ScreenGuis). All creator and playback
-    interactions must be handled strictly via hotkeys (UserInputService /
-    ContextActionService) to minimize overhead and focus 100% on engine
-    mechanics.
+  - Modular GUI & Hotkeys (updated user request): Provide a polished native
+    Roblox GUI in a separate module for creator and playback controls. Keep
+    hotkeys available and support disabling the GUI. Do not couple interface
+    updates to the physics timeline or require a third-party UI library.
 
 2. Technical Directives & Map Mechanics
 
@@ -161,3 +160,5 @@ CURRENT IMPLEMENTATION SCOPE (USER CLARIFICATION)
   - Quaternion storage is preferred; tiny floating-point differences are
     acceptable. Do not claim mathematically exact or server-deterministic
     playback.
+  - The latest user request supersedes the earlier headless-only requirement:
+    add a polished GUI in its own module while retaining hotkeys.

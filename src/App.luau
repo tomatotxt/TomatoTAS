@@ -132,7 +132,7 @@ return function(import,config)
         if not ok then
             self.mode="idle"
             if self.character then pcall(function() self.character:Release() end) end
-            warn("[TomatoTAS] "..tostring(err))
+            self:Notify(tostring(err),"error")
         end
         return ok
     end
@@ -143,7 +143,7 @@ return function(import,config)
         local ok,err=xpcall(fn,debug.traceback)
         if not ok and token==self.cancelId and not self.scope.dead then
             self:Stop()
-            warn("[TomatoTAS] "..tostring(err))
+            self:Notify(tostring(err),"error")
         end
         self.busy=false
         return ok
@@ -159,7 +159,7 @@ return function(import,config)
         if action=="Stop" or action=="Unload" then actions[action](self); return true end
         if self.busy then return false end
         local reason=self:ActionReason(action)
-        if reason then print("[TomatoTAS] "..reason); return false end
+        if reason then self:Notify(reason); return false end
         return self:Command(function() actions[action](self) end)
     end
     function App:ActionReason(action)
@@ -184,8 +184,18 @@ return function(import,config)
     end
     function App:FileCommand(method,...)
         local ok,result=pcall(self[method],self,...)
-        if not ok then warn("[TomatoTAS] "..method.." failed: "..tostring(result)) end
+        if not ok then self:Notify(method.." failed: "..tostring(result),"error") end
         return ok,result
+    end
+    function App:Notify(message,level)
+        self.lastNotice={text=tostring(message),level=level or "info",time=os.clock()}
+        if level=="error" or level=="warning" then warn("[TomatoTAS] "..tostring(message))
+        else print("[TomatoTAS] "..tostring(message)) end
+    end
+    function App:SetFile(name)
+        assert(type(name)=="string" and #name>0 and #name<=100 and name:match("^[%w_%-]+$"),
+            "Run name must contain only letters, numbers, underscores or hyphens (no extension)")
+        config.File=name
     end
     function App:Attach(character)
         if self.character then self.character:Destroy() end
@@ -196,7 +206,7 @@ return function(import,config)
         assert(not self.map.clone,"Destroy/reload the tool before changing maps from a sandbox")
         self.map:Acquire()
         self:Attach(Players.LocalPlayer.Character)
-        print("[TomatoTAS] Prepared "..self.map.name)
+        self:Notify("Prepared "..self.map.name..". Ready to record.")
     end
     function App:PrepareClone()
         self:Stop()
@@ -210,7 +220,7 @@ return function(import,config)
             if not self.scope.dead then self.map=Map.new() end
             error(err)
         end
-        warn("[TomatoTAS] Static sandbox ready. Server-driven map mechanics and full world rewind are not implemented.")
+        self:Notify("Static sandbox ready. Server-driven mechanics and full world rewind are not implemented.","warning")
     end
     function App:ReadyReason(ignoreRun)
         if not self.character or not self.character:Valid() or not self.map.origin then return "Prepare a map and living character first." end
@@ -240,7 +250,7 @@ return function(import,config)
         self.character:Resume(self.tree.nodes[self.tree.cursor].frame,self.map.origin)
         self.current=nil; self.path=nil
         self.mode="recording"
-        print("[TomatoTAS] Recording from node "..self.tree.cursor)
+        self:Notify("Recording from node "..self.tree.cursor..".")
     end
     function App:Pause()
         self:Ready()
@@ -296,10 +306,15 @@ return function(import,config)
         end
         local index=table.find(tips,self.path and self.path[#self.path] or self.tree.cursor) or 0
         local tip=tips[index%#tips+1]
+        self:SelectBranch(tip)
+        self:Notify("Branch tip "..tip)
+        return true
+    end
+    function App:SelectBranch(tip)
+        self:Ready()
+        assert(self.tree and self.tree.tips[tip],"Unknown branch tip")
         self.path=self.tree:Path(tip)
         self:Seek(tip)
-        print("[TomatoTAS] Branch tip "..tip)
-        return true
     end
     function App:Step()
         assert(self.mode=="paused","Pause before stepping one physics frame")
@@ -308,12 +323,12 @@ return function(import,config)
     end
     function App:Mark(name)
         self:Pause(); self.tree:Mark(name)
-        warn("[TomatoTAS] Character mark saved. World state is not captured in this version.")
+        self:Notify("Character mark '"..name.."' saved. World state is not captured.","warning")
     end
     function App:Restore(name)
         assert(self.tree and self.tree.marks[name],"Unknown character mark")
         self:Seek(self.tree.marks[name])
-        warn("[TomatoTAS] Character restored. Map timers, buttons and liquids have not been rewound.")
+        self:Notify("Character restored. Map timers, buttons and liquids have not been rewound.","warning")
     end
     function App:SetSpeed(speed)
         assert(type(speed)=="number" and speed>0 and speed<=16,"Playback speed must be >0 and <=16")
@@ -334,7 +349,7 @@ return function(import,config)
     function App:Save(name)
         assert(self.tree and #self.tree.nodes>0,"No run to save")
         local target,size=Storage.save(name or config.File,self.tree)
-        print("[TomatoTAS] Saved "..target.." ("..size.." bytes)")
+        self:Notify("Saved "..target.." ("..size.." bytes).")
         return target
     end
     function App:Load(name,source)
@@ -342,7 +357,7 @@ return function(import,config)
         if self.map.name then assert(tree.metadata.map==self.map.name,"File map does not match prepared map") end
         if self.map.spawnName then assert(tree.metadata.spawn==self.map.spawnName,"File spawn does not match prepared map") end
         self:Stop(); self.tree=tree; self.time=tree.nodes[tree.cursor].frame.time
-        print("[TomatoTAS] Loaded "..#tree.nodes.." frames across "..#tree:Branches().." branches")
+        self:Notify("Loaded "..#tree.nodes.." frames across "..#tree:Branches().." branches.")
     end
     function App:ListFiles() return Storage.list() end
     function App:Status()
