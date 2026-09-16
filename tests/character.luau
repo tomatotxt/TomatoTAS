@@ -136,6 +136,17 @@ test("capture sorts animations independently of engine enumeration",function()
     assert(first.root[1]==10 and first.root[7]==1)
     c:Destroy()
 end)
+
+test("constructor failure disconnects events connected before initialization failed",function()
+    local original,model=setup()
+    original:Destroy()
+    local events=model.children.Animate.children
+    events.Swinging.Event.Connect=function() error("second event connection failed") end
+    local ok,err=pcall(function() Character.new(model) end)
+    assert(not ok and tostring(err):find("second event connection failed",1,true))
+    assert(next(events.Sliding.Event.listeners)==nil,"Failed constructor retained its first event subscription")
+    assert(next(events.Walljump.Event.listeners)==nil)
+end)
 test("puppet release restores geometry scripts particles and camera",function()
     local c,model,root,hum,_,camera=setup()
     local f=sample(c)
@@ -250,6 +261,22 @@ test("takeover ownership cannot release another controller",function()
     local second=Character.new(model)
     assert(not pcall(function() second:Acquire() end))
     assert(shared.__TomatoTASMoveHook.owner==c and root.Anchored)
+    second:Destroy(); c:Destroy()
+end)
+
+test("rejected takeover never restores properties owned by another controller",function()
+    local c,model,root,hum=setup()
+    c:Apply(sample(c),cf(),false)
+    local second=Character.new(model)
+    local changes=0
+    local changeState=hum.ChangeState
+    hum.ChangeState=function(self,state) changes+=1; changeState(self,state) end
+    root.failProperty="Anchored"
+    local ok,err=pcall(function() second:Acquire() end)
+    assert(not ok and tostring(err):find("controlled by another TomatoTAS instance",1,true))
+    assert(#warnings==0 and changes==0,"Rejected takeover wrote the active controller's properties")
+    assert(shared.__TomatoTASMoveHook.owner==c and root.Anchored and not second.saved)
+    root.failProperty=nil
     second:Destroy(); c:Destroy()
 end)
 test("refresh recovers slide flag from actual standing geometry",function()

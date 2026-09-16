@@ -19,6 +19,7 @@ config.BatchSize = config.BatchSize or 100
 config.MaxNodes = config.MaxNodes or 1000000
 config.MaxFileBytes = config.MaxFileBytes or 268435456
 config.File = config.File or "run"
+assert(config.AutoPrepare==nil or type(config.AutoPrepare)=="boolean", "AutoPrepare must be a boolean")
 assert(type(config.Directory)=="string" and config.Directory:match("^[%w_%-]+$"),
     "Directory must be a simple relative folder name")
 assert(type(config.File)=="string" and #config.File>0 and #config.File<=100 and config.File:match("^[%w_%-]+$"),
@@ -66,6 +67,7 @@ if previous then
     end
 end
 env.TomatoTAS = app
+app:StartAutoPrepare()
 if config.GUI~=false then
     local ok,err=pcall(function()
         local panel=import("ui/Panel").new(app)
@@ -74,5 +76,5 @@ if config.GUI~=false then
     end)
     if not ok then warn("[TomatoTAS] GUI unavailable; hotkeys remain active: "..tostring(err)) end
 end
-print("[TomatoTAS] Ready. F1 prepare live map; F2 record/pause; F3 play/pause; F8 clone. See README for all controls.")
+print("[TomatoTAS] Ready. Map preparation is automatic; F1 retries it. F2 record/pause; F3 play/pause; F8 clone.")
 return app

@@ -25,6 +25,7 @@ getgenv().TomatoTASConfig = {
     Directory = "TomatoTAS", -- executor-relative save folder
     File = "run",            -- default F6/F7 filename, without extension
     GUI = true,              -- false keeps the hotkey-only interface
+    AutoPrepare = true,      -- prepares each live map after your character arrives
 }
 local c = getgenv().TomatoTASConfig
 loadstring(game:HttpGet(
@@ -70,11 +71,17 @@ the panel, or set `GUI = false` to run without it. No third-party UI library or
 remote image assets are required.
 
 1. Load the tool before a new FE2 round when possible, so it captures zipline data.
-2. Stand on the map's spawn platform and press **F1**. Preparation verifies a
-   living character and the live-map spawn, then waits for one continuous second
-   of stability. Small movements accumulate against the start of the stable interval.
+2. Enter the round and stay on its spawn while preparation completes automatically.
+   Preparation finds the live map and your character, waits for one continuous
+   second of spawn stability, and captures your exact spawn-relative transform.
+   Small movements accumulate against the start of the stable interval. **F1** /
+   **Prepare map** remains available for a manual retry; `AutoPrepare = false`
+   restores manual-only preparation. Preparation does not start recording.
 3. For a static local clone, press **F8**. This prepares a clone and respawns you
    onto its settled spawn. It does not simulate server-controlled map mechanics.
+   Once respawn and character attachment succeed, the original map is deleted
+   locally. While recording in the clone, incoming `Map` / `NewMap` models in
+   `workspace.Multiplayer` are also deleted locally. Pause or stop ends this cleanup.
    Clone creation may take time on large maps; do not change rounds during it.
 4. Press **F2** to record your own movement, then **F2** to pause.
 5. Use **F4/F5** for a character mark/restore, **F10** for a single physics step,
@@ -90,7 +97,7 @@ map name and spawn path must match the run.
 
 | Key | Action |
 | --- | --- |
-| F1 | Prepare current live map and character |
+| F1 | Manually retry preparation of the current map and character |
 | F2 | Record / pause recording |
 | F3 | Play selected branch / pause playback |
 | F4 | Save character mark `quick` and pause |
@@ -107,6 +114,9 @@ map name and spawn path must match the run.
 Hotkeys are ignored while typing. During map operations, F9 cancels and End unloads;
 other hotkeys are ignored until the operation finishes. Console
 messages report errors and status, which also appear in the GUI's status bar.
+Stopping an automatic preparation suppresses retries for that map and character;
+press F1 to retry, or enter another round. Automatic preparation never replaces
+an existing run: use **New run** if you want to record a different map.
 Unavailable actions display guidance without changing character control. A failed
 save or load also leaves an ongoing recording or playback active.
 
@@ -239,9 +249,20 @@ without changing the descendant count is detected. Failed placement of either ma
 rolls back the placement and disposes of the unfinished clone. Zipline packets are
 associated with map instances; a later round cannot replace a sandbox's rope cache.
 
-The sandbox preserves world coordinates for zipline nodes. The live map is moved
-locally to ReplicatedStorage while the clone occupies its position; unloading
-restores it if it still exists. Clone scripts are disabled. The clone is a static
+The sandbox preserves world coordinates for zipline nodes. During setup, the live
+map is temporarily moved to ReplicatedStorage so failed cloning or respawn can
+restore it. After the new character has successfully respawned at the clone and
+attached, the source map is destroyed locally. It is no longer restored on unload;
+wait for a new round or rejoin to obtain a fresh live map.
+
+While recording or advancing a simulation frame in a committed sandbox, scoped
+listeners remove existing and newly arriving `Map` / `NewMap` models directly
+under `workspace.Multiplayer`. Renamed maps and replacement Multiplayer containers
+are handled. Unrelated objects and the sandbox are left alone. Pausing, playback,
+stopping, failure cleanup and unloading disconnect those listeners. Removal affects
+your client; it does not delete the server's maps or other players' maps.
+
+Clone scripts are disabled. The clone is a static
 snapshot of the moment it was copied, not a reconstructed map at round start.
 Server-controlled mechanics, client scripts that assume `workspace.Multiplayer.Map`,
 and game updates can affect sandbox behavior. Test this integration before relying

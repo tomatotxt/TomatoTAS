@@ -19,7 +19,7 @@ local function signal()
     return s
 end
 local services={
-    RunService={PostSimulation=signal(),PreSimulation=signal(),RenderStepped=signal()},
+    RunService={PostSimulation=signal(),PreSimulation=signal(),RenderStepped=signal(),Heartbeat=signal()},
     UserInputService={InputBegan=signal(),GetFocusedTextBox=function() return nil end},
     Players={LocalPlayer={Name="Tester",Character={}},CharacterAdded=signal()},
 }
@@ -51,8 +51,11 @@ modules["runtime/Character"]={new=function(model)
         ReleaseCamera=function(self) self.cameraReleased=true end,Destroy=function() end}
 end}
 modules["runtime/Map"]={new=function()
-    return {origin={},live={Parent=true},name="Test",spawnName="Spawn",generation=0,Acquire=function() end,
-        Destroy=function() end,RestoreRopes=function() end}
+    return {origin={},live={Parent=true},name="Test",spawnName="Spawn",generation=0,
+        Acquire=function(self) return self,services.Players.LocalPlayer.Character end,
+        Destroy=function(self) self.destroyed=true end,RestoreRopes=function() end,
+        AutoCandidate=function() return nil end,ReadyReason=function() return nil end,
+        SetRecording=function(self,active) self.recording=active end}
 end}
 modules["runtime/Storage"]={save=function() return "test",100 end,list=function() return {} end}
 local App=factory(import,config)
@@ -65,6 +68,7 @@ local count=0
 local function test(name,fn)
     table.clear(warnings)
     config.Keybinds=nil
+    config.AutoPrepare=nil
     fn(); count+=1; print("PASS "..name)
 end
 local function record(app,n)
@@ -309,6 +313,220 @@ test("GUI notices and run names use the shared application state",function()
     app:Notify("Saved successfully","info")
     assert(app.lastNotice.text=="Saved successfully" and app.lastNotice.level=="info")
     config.File=original
+    app:Destroy()
+end)
+test("failed constructor disconnects partially installed engine callbacks",function()
+    local connect=services.RunService.RenderStepped.Connect
+    local newMap=modules["runtime/Map"].new
+    local map
+    modules["runtime/Map"].new=function() map=newMap(); return map end
+    services.RunService.RenderStepped.Connect=function() error("signal unavailable") end
+    local ok=pcall(App.new)
+    services.RunService.RenderStepped.Connect=connect
+    modules["runtime/Map"].new=newMap
+    assert(not ok and map.destroyed)
+    assert(next(services.RunService.PreSimulation.callbacks)==nil)
+    assert(next(services.RunService.PostSimulation.callbacks)==nil)
+end)
+
+test("failed first capture preserves an existing run and allows retry",function()
+    local app=fresh(); record(app,2); app:Stop()
+    local original,capture=app.tree,app.character.Capture
+    app.character.Capture=function() error("character not ready") end
+    assert(not pcall(function() app:NewRun() end))
+    assert(app.tree==original and #app.tree.nodes==3)
+    app.tree=nil
+    assert(not pcall(function() app:Record() end) and app.tree==nil)
+    app.character.Capture=capture
+    app:Record()
+    assert(app.mode=="recording" and #app.tree.nodes==1)
+    app:Destroy()
+end)
+
+test("new run from a held frame keeps original movement and animation state",function()
+    local app=fresh(); record(app,2)
+    local source=app.current
+    source.tracks={{id="example",time=0.2,speed=1,weight=1,priority=2,looped=0}}
+    app.character.Capture=function() error("must not capture puppet-modified properties") end
+    app:NewRun()
+    local first=app.tree.nodes[1].frame
+    assert(first~=source and first.time==0 and source.time>0)
+    assert(first.humanoid[5]==1 and first.tracks[1].speed==1)
+    app:Record()
+    assert(app.character.resumed==first)
+    app:Destroy()
+end)
+
+test("playback and immediate pause agree with the first visible frame",function()
+    for _,mode in ipairs({"time","frames"}) do
+        local app=fresh(); record(app,2)
+        app:Play(nil,mode)
+        assert(app.tree.cursor==1 and app.time==0 and app.character.applied==app.tree.nodes[1].frame)
+        app:Pause()
+        assert(app.tree.cursor==1 and app.current==app.tree.nodes[1].frame and app.time==0)
+        app:Destroy()
+    end
+end)
+
+test("FE2 movement lock prevents recording but our puppet anchor can resume",function()
+    local app=fresh()
+    app.character.root={Anchored=true}
+    assert(not app:Dispatch("Record") and not app.tree and #warnings==0)
+    app.character.root.Anchored=false
+    record(app,1)
+    app.character.root.Anchored=true; app.character.saved={anchored=false}
+    assert(app:Dispatch("Record") and app.mode=="recording")
+    app:Destroy()
+end)
+
+test("failed capture leaves the clock at the last saved frame",function()
+    local app=fresh(); app:Record()
+    services.RunService.PostSimulation:Fire(0.1)
+    app.character.Capture=function() error("lost character") end
+    services.RunService.PostSimulation:Fire(0.5)
+    assert(app.mode=="idle" and app.time==0.1 and #app.tree.nodes==2)
+    assert(not app.current and not app.path and not app.map.recording)
+    app:Destroy()
+end)
+
+local function automatic()
+    local app=App.new()
+    app.map.live=nil; app.map.origin=nil
+    local candidate={map={Parent=true},character=services.Players.LocalPlayer.Character,ready=false,attempts=0}
+    app.map.AutoCandidate=function()
+        if candidate.ready then return candidate.map,candidate.character end
+        return nil
+    end
+    app.map.Acquire=function(self)
+        candidate.attempts+=1
+        self.live=candidate.map; self.origin={}
+        return self,candidate.character
+    end
+    return app,candidate
+end
+
+test("automatic preparation waits for entry and starts only after loader handoff",function()
+    local app,candidate=automatic()
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(candidate.attempts==0)
+    candidate.ready=true
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(candidate.attempts==0)
+    app:StartAutoPrepare()
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(candidate.attempts==1 and app.character.model==candidate.character and not app.busy)
+    services.RunService.Heartbeat:Fire(1)
+    assert(candidate.attempts==1)
+    app:Destroy()
+    assert(next(services.RunService.Heartbeat.callbacks)==nil)
+end)
+
+test("automatic preparation follows another round without deleting the old run",function()
+    local app,candidate=automatic(); candidate.ready=true; app:StartAutoPrepare()
+    services.RunService.Heartbeat:Fire(0.3)
+    record(app,2); app:Stop()
+    local tree=app.tree
+    candidate.map={Parent=true}
+    app.map.name="Next round"
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(candidate.attempts==2 and app.map.live==candidate.map and app.tree==tree)
+    assert(app:ActionReason("Record"),"A different map must not silently replace the run")
+    app:Destroy()
+end)
+
+test("automatic preparation is idle-only and can be disabled",function()
+    local app,candidate=automatic(); candidate.ready=true; app:StartAutoPrepare()
+    config.AutoPrepare=false
+    services.RunService.Heartbeat:Fire(1)
+    assert(candidate.attempts==0)
+    config.AutoPrepare=true
+    app.busy=true; services.RunService.Heartbeat:Fire(1); app.busy=false
+    assert(candidate.attempts==0)
+    services.RunService.Heartbeat:Fire(0.3)
+    record(app,1)
+    candidate.map={Parent=true}
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(candidate.attempts==1 and app.mode=="paused")
+    app:Destroy()
+end)
+
+test("stopping queued automatic preparation suppresses restart until a new round",function()
+    local app,candidate=automatic(); candidate.ready=true; app:StartAutoPrepare()
+    local spawn=environment.task.spawn
+    local pending
+    environment.task.spawn=function(fn) pending=fn end
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(app.busy and pending)
+    app:Cancel()
+    pending()
+    environment.task.spawn=spawn
+    services.RunService.Heartbeat:Fire(1)
+    assert(candidate.attempts==0 and not app.busy and #warnings==0)
+    candidate.map={Parent=true}
+    services.RunService.Heartbeat:Fire(0.3)
+    assert(candidate.attempts==1)
+    app:Destroy()
+end)
+
+test("automatic preparation retries failures with a delay and no warning spam",function()
+    local app,candidate=automatic(); candidate.ready=true; app:StartAutoPrepare()
+    local acquire=app.map.Acquire
+    local attempts=0
+    app.map.Acquire=function(self)
+        attempts+=1
+        if attempts<3 then error("spawn still moving") end
+        return acquire(self)
+    end
+    services.RunService.Heartbeat:Fire(0.3)
+    services.RunService.Heartbeat:Fire(1)
+    assert(attempts==1 and #warnings==1)
+    services.RunService.Heartbeat:Fire(5)
+    assert(attempts==2 and #warnings==1)
+    services.RunService.Heartbeat:Fire(5)
+    assert(attempts==3 and app.character and not app.busy)
+    app:Destroy()
+end)
+
+test("sandbox source is committed only after respawn and character attachment",function()
+    local app=fresh()
+    local events={}
+    app.map.Clone=function(self) self.clone={Parent=true}; table.insert(events,"clone") end
+    app.map.Respawn=function() table.insert(events,"respawn"); return services.Players.LocalPlayer.Character end
+    local attach=app.Attach
+    app.Attach=function(self,character) attach(self,character); table.insert(events,"attach") end
+    app.map.CommitSandbox=function() table.insert(events,"commit") end
+    app:PrepareClone()
+    assert(table.concat(events,",")=="clone,respawn,attach,commit")
+    assert(not pcall(function() app:PrepareClone() end) and not app.map.destroyed)
+    app:Destroy()
+end)
+
+test("failed sandbox respawn never commits source deletion",function()
+    local app=fresh()
+    local previous=app.map
+    previous.Clone=function(self) self.clone={Parent=true} end
+    previous.Respawn=function() error("respawn failed") end
+    previous.CommitSandbox=function() error("source must not be deleted") end
+    assert(not pcall(function() app:PrepareClone() end))
+    assert(previous.destroyed and app.map~=previous and not app.character)
+    app:Destroy()
+end)
+
+test("incoming-map removal follows recording pause step playback and stop",function()
+    local app=fresh()
+    record(app,1)
+    assert(not app.map.recording)
+    app:Record(); assert(app.map.recording)
+    app:Pause(); assert(not app.map.recording)
+    app:Step(); assert(not app.map.recording)
+    services.RunService.PreSimulation:Fire(0.1)
+    assert(app.map.recording)
+    services.RunService.PostSimulation:Fire(0.1)
+    assert(not app.map.recording)
+    app:Record(); app:Play()
+    assert(not app.map.recording)
+    app:Pause(); app:Record(); app:Stop()
+    assert(not app.map.recording)
     app:Destroy()
 end)
 print("Controller tests passed: "..count)

@@ -77,10 +77,10 @@ A. Dynamic Spawn Settle & Offset Resolution
     \text{spawnOffsetCFrame} = \text{Spawn}_{\text{live}}.\text{CFrame}:\text{ToObjectSpace}(\text{Root}.\text{CFrame})
     Applied at playback via:
     \text{TargetCFrame} = \text{Spawn}_{\text{target}}.\text{CFrame} \times \text{spawnOffsetCFrame}
-  - In-Game Verification: Ensure the character is out of the lobby lift
-    (Vector3.new(-25, -144, 139)) by asserting
-    \text{distance} > 300\text{ studs}, HumanoidRootPart.Anchored == false, and
-    Humanoid.WalkSpeed >= 20.
+  - In-Game Verification (updated after runtime errors): Verify that a living
+    character is actually at the current live map's spawn. Do not depend on a
+    hard-coded lobby coordinate or a minimum WalkSpeed. Preparation may observe
+    a loading anchor; recording must wait until FE2 releases that anchor.
 
 B. Anti-Tamper & Clean Cloning
 
@@ -162,3 +162,9 @@ CURRENT IMPLEMENTATION SCOPE (USER CLARIFICATION)
     playback.
   - The latest user request supersedes the earlier headless-only requirement:
     add a polished GUI in its own module while retaining hotkeys.
+  - Prepare maps automatically after the character arrives at the live map;
+    keep manual preparation as a retry. Preserve existing recorded runs.
+  - After cloning and a successful reset/respawn onto the clone, delete the
+    original map locally. While recording in the sandbox, also remove maps
+    arriving as Map/NewMap under workspace.Multiplayer. Stop those listeners
+    when recording is paused/stopped or the tool is unloaded.

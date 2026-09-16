@@ -72,6 +72,15 @@ return function(import,config)
         spawn=result and result.Instance
         return if spawn and spawn:IsA("BasePart") and spawn:IsDescendantOf(live) then spawn else nil
     end
+    function Map:AutoCandidate()
+        if self.scope.dead or self.clone then return nil end
+        local multiplayer=workspace:FindFirstChild("Multiplayer")
+        local live=multiplayer and multiplayer:FindFirstChild("Map")
+        local character=self:LivingCharacter()
+        if not live or not live:IsA("Model") or not character then return nil end
+        if self:FindSpawn(live,character:FindFirstChild("HumanoidRootPart")) then return live,character end
+        return nil
+    end
     function Map:Acquire()
         assert(not self.scope.dead,"Map operation cancelled")
         assert(not self.clone,"Destroy the sandbox before acquiring another map")
@@ -79,7 +88,11 @@ return function(import,config)
         local token=self.generation
         local multiplayer=self:Wait(function() return workspace:FindFirstChild("Multiplayer") end,token,
             "Timed out waiting for FE2's Multiplayer container. Wait for the game to load and retry Prepare.")
-        self:Wait(function() return multiplayer:FindFirstChild("Map") end,token,
+        self:Wait(function()
+            multiplayer=workspace:FindFirstChild("Multiplayer")
+            local live=multiplayer and multiplayer:FindFirstChild("Map")
+            return if live and live:IsA("Model") then live else nil
+        end,token,
             "Timed out waiting for the FE2 map. Start a round and retry Prepare.")
         -- FE2 can temporarily anchor the root or lower WalkSpeed while placing a
         -- player at spawn. The live map and spawn checks below are the authority
@@ -88,9 +101,10 @@ return function(import,config)
         local character=self:Wait(function()
             -- Map replication can finish before the lobby character is moved. Look
             -- up the current map each time so a new round cannot leave a stale map.
-            live=multiplayer:FindFirstChild("Map")
+            multiplayer=workspace:FindFirstChild("Multiplayer")
+            live=multiplayer and multiplayer:FindFirstChild("Map")
             local candidate=self:LivingCharacter()
-            if not live or not candidate then return nil end
+            if not live or not live:IsA("Model") or not candidate then return nil end
             root=candidate:FindFirstChild("HumanoidRootPart")
             spawn=self:FindSpawn(live,root)
             return if spawn then candidate else nil
@@ -98,8 +112,10 @@ return function(import,config)
         self:Settle(spawn,token)
         assert(self:LivingCharacter()==character and character:FindFirstChild("HumanoidRootPart")==root,
             "Character changed or died during settling; retry Prepare.")
-        assert(live.Parent==multiplayer and multiplayer:FindFirstChild("Map")==live and spawn:IsDescendantOf(live),
+        assert(workspace:FindFirstChild("Multiplayer")==multiplayer and live.Parent==multiplayer
+            and multiplayer:FindFirstChild("Map")==live and spawn:IsDescendantOf(live),
             "Map/spawn changed during settling; retry Prepare.")
+        assert(self:FindSpawn(live,root)==spawn,"Character left the spawn during settling; retry Prepare.")
         local settings=live:FindFirstChild("Settings")
         self.live,self.spawn=live,spawn
         self.ropes=self.ropeCache[live]
@@ -119,7 +135,7 @@ return function(import,config)
         self.spawnName=spawn:GetFullName():sub(#live:GetFullName()+2)
         self.origin=spawn.CFrame
         self.offset=spawn.CFrame:ToObjectSpace(root.CFrame)
-        return self
+        return self,character
     end
     function Map:Settle(spawn,token)
         token=token or self.generation
@@ -254,6 +270,7 @@ return function(import,config)
     end
     function Map:Respawn()
         assert(self.clone,"Clone first")
+        self.sandboxCharacter=nil
         local token=self.generation
         self:Check(token,os.clock()+config.Timeout)
         local clone,spawn,offset=self.clone,self.cloneSpawn,self.offset
@@ -272,6 +289,10 @@ return function(import,config)
         local remote=Storage:FindFirstChild("Remote")
         if remote and remote:FindFirstChild("RemoveWaiting") then remote.RemoveWaiting:FireServer() end
         self:RestoreRopes(c)
+        self:Wait(function()
+            assert(self:LivingCharacter()==c,"Character changed during sandbox respawn")
+            return not c:FindFirstChild("HumanoidRootPart").Anchored
+        end,token,"Timed out waiting for FE2 to release the respawned character. Leave the waiting area and retry sandbox respawn.")
         self:Settle(spawn,token)
         assert(self:LivingCharacter()==c,
             "Character changed during sandbox respawn")
@@ -280,10 +301,101 @@ return function(import,config)
         root.CFrame=spawn.CFrame*offset
         root.AssemblyLinearVelocity=Vector3.zero
         root.AssemblyAngularVelocity=Vector3.zero
+        self.sandboxCharacter=c
         return c
+    end
+    function Map:CommitSandbox()
+        assert(not self.scope.dead,"Map operation cancelled")
+        assert(self.clone and self.clone.Parent==workspace and self.cloneSpawn
+            and self.cloneSpawn:IsDescendantOf(self.clone),"Sandbox was removed before setup completed")
+        if self.sandboxCommitted then return self.clone end
+        assert(self.sandboxCharacter and self:LivingCharacter()==self.sandboxCharacter,
+            "Finish sandbox respawn before removing the source map")
+        -- Keep the source recoverable until the caller has successfully respawned
+        -- and attached to the sandbox character. Only then is it disposable.
+        local live=assert(self.live,"Sandbox source map unavailable")
+        live:Destroy()
+        self.live,self.liveParent,self.spawn=nil,nil,nil
+        self.sandboxCommitted=true
+        return self.clone
+    end
+    function Map:SetRecording(active)
+        if not active then
+            self.recording=false
+            if self.recordingScope then self.recordingScope:Destroy(); self.recordingScope=nil end
+            return
+        end
+        assert(not self.scope.dead,"Map operation cancelled")
+        -- Live recording keeps the server's map. Only a completed sandbox owns
+        -- the local removal policy for subsequently replicated rounds.
+        if not self.clone then self:SetRecording(false); return end
+        assert(self.sandboxCommitted,"Complete sandbox setup before recording")
+        local reason=self:ReadyReason()
+        assert(not reason,reason)
+        if self.recordingScope then return end
+        local recordingScope=Scope.new()
+        self.recording,self.recordingScope=true,recordingScope
+        local multiplayer,containerScope
+        local function guarded(fn)
+            return function(...)
+                if recordingScope.dead then return end
+                local ok,err=xpcall(fn,debug.traceback,...)
+                if not ok then
+                    self:SetRecording(false)
+                    warn("[TomatoTAS] Incoming map cleanup stopped: "..tostring(err))
+                end
+            end
+        end
+        local function allowed()
+            return not recordingScope.dead and self.recording and not self.scope.dead
+                and self.clone and self.clone.Parent==workspace and self.cloneSpawn
+                and self.cloneSpawn:IsDescendantOf(self.clone)
+        end
+        local function refresh()
+            if not allowed() then return end
+            local current=workspace:FindFirstChild("Multiplayer")
+            if current==multiplayer then return end
+            if containerScope then containerScope:Destroy(); containerScope=nil end
+            multiplayer=current
+            if not current then return end
+            containerScope=Scope.new()
+            local children={}
+            containerScope:Add(function()
+                for _,scope in pairs(children) do scope:Destroy() end
+                table.clear(children)
+            end)
+            local function remove(child)
+                if allowed() and workspace:FindFirstChild("Multiplayer")==current and child.Parent==current
+                    and child~=self.clone and child:IsA("Model") and (child.Name=="Map" or child.Name=="NewMap") then
+                    child:Destroy()
+                end
+            end
+            local function watch(child)
+                if not child:IsA("Model") or children[child] then return end
+                local scope=Scope.new()
+                children[child]=scope
+                scope:Add(child:GetPropertyChangedSignal("Name"):Connect(guarded(function() remove(child) end)))
+                remove(child)
+            end
+            containerScope:Add(current.ChildAdded:Connect(guarded(watch)))
+            containerScope:Add(current.ChildRemoved:Connect(guarded(function(child)
+                if children[child] then children[child]:Destroy(); children[child]=nil end
+            end)))
+            containerScope:Add(current:GetPropertyChangedSignal("Name"):Connect(guarded(refresh)))
+            -- Subscribe before enumerating so maps arriving during setup are covered.
+            for _,child in ipairs(current:GetChildren()) do watch(child) end
+        end
+        recordingScope:Add(function() if containerScope then containerScope:Destroy() end end)
+        local ok,err=xpcall(function()
+            recordingScope:Add(workspace.ChildAdded:Connect(guarded(refresh)))
+            recordingScope:Add(workspace.ChildRemoved:Connect(guarded(refresh)))
+            refresh()
+        end,debug.traceback)
+        if not ok then self:SetRecording(false); error(err) end
     end
     function Map:Destroy()
         self.generation+=1
+        self:SetRecording(false)
         self.scope:Destroy()
         if self.clone then
             local ok,err=pcall(function() self.clone:Destroy() end)
@@ -296,6 +408,7 @@ return function(import,config)
             else warn("[TomatoTAS] Live map restore: "..tostring(err)) end
         end
         self.ropes=nil
+        self.sandboxCharacter=nil
         table.clear(self.ropeCache)
     end
     return Map

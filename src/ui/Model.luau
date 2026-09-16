@@ -31,7 +31,7 @@ return function()
         local tip=app.path and app.path[#app.path] or id
         local finish=tree and tree.nodes[tip]
         local duration=finish and finish.frame.time or 0
-        return {mode=if app.busy then "preparing" else app.mode,map=app.map.name or "No map prepared",
+        return {mode=if app.busy then "preparing" else app.mode,map=app.map.name or "Waiting for map…",
             node=id,nodes=tree and #tree.nodes or 0,time=app.time or 0,duration=duration,
             progress=if duration>0 then math.clamp((app.time or 0)/duration,0,1) else 0}
     end

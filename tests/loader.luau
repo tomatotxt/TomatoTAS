@@ -10,6 +10,10 @@ local function run(config,fixtures,options)
     end}
     local nextApp={name="new",scope={Add=function() end},Destroy=function() table.insert(events,"discard") end}
     local shared={TomatoTASConfig=config,TomatoTAS=previous}
+    nextApp.StartAutoPrepare=function()
+        assert(shared.TomatoTAS==nextApp and events[#events]=="destroy")
+        table.insert(events,"auto")
+    end
     local environment
     environment=setmetatable({
         getgenv=function() return shared end,
@@ -52,7 +56,7 @@ test("loader defaults target TomatoTAS live",function()
     local r=run(nil,{App=appSource})
     assert(r.ok and r.result==r.nextApp and r.shared.TomatoTAS==r.nextApp)
     assert(r.requests[1]=="https://raw.githubusercontent.com/tomatotxt/TomatoTAS/live/src/App.luau")
-    assert(table.concat(r.events,",")=="validate,new,destroy")
+    assert(table.concat(r.events,",")=="validate,new,destroy,auto")
 end)
 test("owner repo and branch are shared by every cached module",function()
     local config={Owner="other",Repo="other-repo",Branch="feature/example",Timeout=12}
@@ -97,7 +101,7 @@ end)
 test("invalid configuration fails before any HTTP request",function()
     for _,config in ipairs({"bad", {Owner="a/b"},{Repo=".."},{Repo="a/b"},{Branch="../main"},
         {Branch="/live"},{Branch="live//bad"},{Timeout=0},{BatchSize=0.5},{MaxFileBytes=100},
-        {Directory="../elsewhere"},{Directory=12},{File="a/b"},{File="run.fe2tomatas"}}) do
+        {Directory="../elsewhere"},{Directory=12},{File="a/b"},{File="run.fe2tomatas"},{AutoPrepare="yes"}}) do
         local r=run(config,{App=appSource})
         assert(not r.ok and #r.requests==0 and #r.events==0)
     end

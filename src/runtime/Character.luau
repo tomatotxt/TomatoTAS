@@ -40,7 +40,11 @@ return function(import)
             table.clear(self.flagConnections)
             table.clear(self.flagSignals)
         end)
-        self:Refresh()
+        local ok,err=xpcall(function() self:Refresh() end,debug.traceback)
+        if not ok then
+            self.scope:Destroy()
+            error(err,0)
+        end
         return self
     end
     function Character:Refresh()
@@ -128,9 +132,6 @@ return function(import)
         assert(self:Valid(),"Character not available")
         self:Refresh()
         local r,h=self.root,self.hum
-        self.saved={anchored=r.Anchored,size=r.Size,hitboxes={},particles={},flags=table.clone(self.flags),
-            hip=h.HipHeight,rotate=h.AutoRotate,platform=h.PlatformStand,speed=h.WalkSpeed,
-            jump=h.JumpPower,height=h.JumpHeight,state=h:GetState(),scripts={}}
         local ok,err=xpcall(function()
             local env=getgenv()
             if not env.__TomatoTASMoveHook then
@@ -144,6 +145,11 @@ return function(import)
             end
             local hook=env.__TomatoTASMoveHook
             assert(type(hook)=="table" and (hook.owner==nil or hook.owner==self),"Character is controlled by another TomatoTAS instance")
+            -- A rejected takeover must not restore a snapshot of properties that
+            -- belong to the active controller, even when their values match.
+            self.saved={anchored=r.Anchored,size=r.Size,hitboxes={},particles={},flags=table.clone(self.flags),
+                hip=h.HipHeight,rotate=h.AutoRotate,platform=h.PlatformStand,speed=h.WalkSpeed,
+                jump=h.JumpPower,height=h.JumpHeight,state=h:GetState(),scripts={}}
             self.hook=hook
             hook.owner=self; hook.humanoid=h; hook.direction=Vector3.zero
             self:SuspendScripts()

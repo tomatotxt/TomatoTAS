@@ -64,10 +64,13 @@ local rs={Heartbeat=signal()}
 local playerGui=instance("PlayerGui")
 local services={UserInputService=ui,RunService=rs,Players={LocalPlayer={WaitForChild=function() return playerGui end}},
     TweenService={Create=function(_,object,_,props) return {Cancel=function() end,Play=function() for k,v in pairs(props) do object[k]=v end end} end}}
+local queuedCallbacks
 local env=setmetatable({
     game={GetService=function(_,name) return assert(services[name],name) end},Instance={new=instance},Enum=enums,
     Color3={fromRGB=color},UDim={new=u},UDim2={new=ud,fromOffset=function(x,y) return ud(0,x,0,y) end,fromScale=function(x,y) return ud(x,0,y,0) end},
-    Vector2={zero=vector(0,0)},TweenInfo={new=function() return {} end},task={spawn=function(fn) fn() end},warn=function() end,
+    Vector2={zero=vector(0,0)},TweenInfo={new=function() return {} end},task={spawn=function(fn)
+        if queuedCallbacks then table.insert(queuedCallbacks,fn) else fn() end
+    end},warn=function() end,
 },{__index=getfenv()})
 setfenv(factory,env)
 local Panel=factory(function(name) return if name=="core/Scope" then Scope else Model end,{File="run"})
@@ -85,6 +88,7 @@ local function app()
     function a:ListFiles() return {"TomatoTAS/alpha.fe2tomatas","C:\\sandbox\\beta.fe2tomatas","ignore.pending"} end
     function a:Seek(id) self.tree.cursor=id; self.time=self.tree.nodes[id].frame.time; self.mode="paused" end
     function a:SelectBranch(id) self.selected=id end
+    function a:NewRun() self.newRuns=(self.newRuns or 0)+1; self.tree=nil end
     return a
 end
 local function tree()
@@ -113,6 +117,7 @@ test("GUI mounts a separate responsive screen and cleans up",function()
     assert(panel.screen.Parent==playerGui and panel.screen.ResetOnSpawn==false)
     assert(panel.pages.Studio.Visible and not panel.pages.Files.Visible)
     assert(panel.window.Size.X.Offset==680 and panel.window.Size.Y.Offset==620)
+    assert(panel.mapLabel.Text=="Waiting for map…" and panel.notice.Text:find("automatically",1,true))
     panel.screen.viewport=vector(360,480); panel:Fit()
     assert(panel.scale.Scale<1 and panel.x>=8 and panel.y>=8)
     panel:Destroy()
@@ -156,6 +161,62 @@ test("timeline cannot seek an active recording",function()
     assert(a.tree.cursor==3 and a.mode=="recording" and a.lastNotice)
     a.mode="paused"; panel:Scrub(24+632*0.5)
     assert(a.tree.cursor==2)
+    panel:Destroy()
+end)
+test("timeline cannot interrupt a pending physics step",function()
+    local a=app(); a.ready=true; a.tree=tree(); a.mode="stepPending"
+    local panel=Panel.new(a)
+    panel:Scrub(24+632*0.5)
+    assert(a.tree.cursor==3 and a.mode=="stepPending" and a.lastNotice)
+    panel:Destroy()
+end)
+
+test("new run confirmation belongs to the run being replaced",function()
+    local a=app(); a.ready=true; a.tree=tree()
+    local panel=Panel.new(a)
+    panel:NewRun()
+    assert(not a.newRuns and a.lastNotice.level=="warning")
+    a.tree=tree() -- a file load can replace the tree before the second click
+    panel:NewRun()
+    assert(not a.newRuns and a.lastNotice.level=="warning")
+    panel:NewRun()
+    assert(a.newRuns==1)
+    panel:Destroy()
+end)
+
+test("new run cannot be confirmed while another operation is running",function()
+    local a=app(); a.ready=true; a.tree=tree(); a.busy=true
+    local panel=Panel.new(a)
+    panel:NewRun()
+    a.busy=false; panel:NewRun()
+    assert(not a.newRuns and a.lastNotice.level=="warning")
+    panel:NewRun()
+    assert(a.newRuns==1)
+    panel:Destroy()
+end)
+
+test("queued row clicks are discarded after refreshing their list",function()
+    local a=app(); local panel=Panel.new(a); panel:Tab("Files")
+    queuedCallbacks={}
+    panel.fileList:GetChildren()[1].Activated:Fire()
+    assert(#queuedCallbacks==1)
+    panel:Files()
+    local callback=queuedCallbacks[1]; queuedCallbacks=nil
+    callback()
+    assert(panel.fileBox.Text=="run")
+    panel:Destroy()
+end)
+
+test("queued actions do not run after becoming disabled",function()
+    local a=app(); a.ready=true
+    local panel=Panel.new(a)
+    queuedCallbacks={}
+    panel.actionButtons.Record.object.Activated:Fire()
+    assert(#queuedCallbacks==1)
+    a.ready=false; panel:Update()
+    local callback=queuedCallbacks[1]; queuedCallbacks=nil
+    callback()
+    assert(#a.events==0)
     panel:Destroy()
 end)
 test("branch rows route selection to the engine",function()

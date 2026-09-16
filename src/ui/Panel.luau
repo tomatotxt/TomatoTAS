@@ -39,9 +39,9 @@ return function(import,config)
         corner(b,9)
         local entry={object=b,enabled=true,base=base,primary=primary}
         scope:Add(b.Activated:Connect(function()
-            if not entry.enabled or self.scope.dead then return end
+            if not entry.enabled or scope.dead or self.scope.dead then return end
             task.spawn(function()
-                if self.scope.dead then return end
+                if not entry.enabled or scope.dead or self.scope.dead then return end
                 local ok,err=pcall(fn)
                 if not ok then self:Notice(tostring(err),"error") end
             end)
@@ -76,12 +76,26 @@ return function(import,config)
         self.app:Notify(message,level or "info")
     end
     function Panel:Run(fn,ready)
+        if self.scope.dead then return end
         if self.app.busy then self:Notice("A map operation is running. Stop can cancel it."); return end
         if ready then
             local reason=self.app:ReadyReason()
             if reason then self:Notice(reason); return end
         end
         self.app:Command(fn)
+    end
+    function Panel:NewRun()
+        if self.app.busy then self:Notice("A map operation is running. Stop can cancel it."); return end
+        local reason=self.app:ReadyReason(true)
+        if reason then self:Notice(reason); return end
+        local tree=self.app.tree
+        if tree and (self.confirmTree~=tree or not self.confirmAt or os.clock()-self.confirmAt>4) then
+            self.confirmTree=tree; self.confirmAt=os.clock()
+            self:Notice("Click New run again within 4 seconds to replace the current run. Save first.","warning")
+            return
+        end
+        self.confirmTree=nil; self.confirmAt=nil
+        self:Run(function() self.app:NewRun(); self:Notice("New run ready. Record when you're ready.") end)
     end
     function Panel:Build()
         self.screen=make("ScreenGui",nil,{Name="TomatoTAS_Interface",ResetOnSpawn=false,DisplayOrder=80,
@@ -105,7 +119,7 @@ return function(import,config)
         self:Button(self.window,"×",634,24,26,28,function() self.app:Dispatch("Unload") end)
         local hero=frame(self.window,24,82,632,100); corner(hero,12); stroke(hero)
         label(hero,"CURRENT MAP",18,12,350,16,10,colors.muted)
-        self.mapLabel=label(hero,"No map prepared",18,33,363,28,20,colors.text,Enum.Font.GothamMedium)
+        self.mapLabel=label(hero,"Waiting for map…",18,33,363,28,20,colors.text,Enum.Font.GothamMedium)
         self.countLabel=label(hero,"NODE 000000   /   0 SAMPLES",18,72,365,15,10,colors.muted,Enum.Font.Code)
         self.clock=label(hero,"00:00.000",398,24,215,38,31,colors.text,Enum.Font.Code)
         self.clock.TextXAlignment=Enum.TextXAlignment.Right
@@ -130,15 +144,7 @@ return function(import,config)
             local page=frame(self.window,24,300,632,254)
             page.BackgroundTransparency=1; page.Visible=false; self.pages[name]=page
         end
-        self:Button(self.window,"New run",532,254,124,32,function()
-            local reason=self.app:ReadyReason(true)
-            if reason then self:Notice(reason); return end
-            if self.app.tree and (not self.confirmAt or os.clock()-self.confirmAt>4) then
-                self.confirmAt=os.clock(); self:Notice("Click New run again within 4 seconds to replace the current run. Save first.","warning"); return
-            end
-            self.confirmAt=nil
-            self:Run(function() self.app:NewRun(); self:Notice("New run ready. Record when you're ready.") end)
-        end)
+        self:Button(self.window,"New run",532,254,124,32,function() self:NewRun() end)
         self.actionButtons={}
         local function action(text,key,x,y,w,h,primary)
             local entry=self:Button(self.pages.Studio,text,x,y,w,h,function() self.app:Dispatch(key) end,primary)
@@ -194,7 +200,7 @@ return function(import,config)
         self:Button(self.pages.Files,"Load backup",194,204,214,38,function() self:File("Load","backup") end)
         self:Button(self.pages.Files,"Load pending",418,204,214,38,function() self:File("Load","pending") end)
         local footer=frame(self.window,24,564,632,36,colors.card); corner(footer,9)
-        self.notice=label(footer,"Ready. Prepare a map, then start recording.",12,4,608,28,11,colors.muted)
+        self.notice=label(footer,"Maps prepare automatically when you spawn. Prepare map retries setup.",12,4,608,28,11,colors.muted)
         self.notice.TextWrapped=true; self.notice.TextTruncate=Enum.TextTruncate.None
         self.launcher=self:Button(self.surface,"●  TomatoTAS  /  Open",16,16,210,40,function() self:Toggle(true) end,true)
         self.launcher.object.Visible=false
@@ -299,7 +305,8 @@ return function(import,config)
         if name=="Files" then self:Files() elseif name=="Branches" then self:Branches() end
     end
     function Panel:Scrub(x)
-        if self.app.busy or self.app.mode=="recording" or self.app.mode=="stepping" then
+        if self.app.busy then self:Notice("A map operation is running. Stop can cancel it."); return end
+        if self.app.mode=="recording" or self.app.mode=="stepPending" or self.app.mode=="stepping" then
             self:Notice("Pause recording before seeking the timeline."); return
         end
         local tree=self.app.tree
@@ -327,6 +334,9 @@ return function(import,config)
         if visible then self:Fit(); self:Update() end
     end
     function Panel:Update()
+        if self.confirmTree~=self.app.tree or (self.confirmAt and os.clock()-self.confirmAt>4) then
+            self.confirmTree=nil; self.confirmAt=nil
+        end
         local state=Model.summary(self.app)
         self.mapLabel.Text=state.map
         self.clock.Text=Model.clock(state.time)

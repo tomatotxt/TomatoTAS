@@ -57,7 +57,8 @@ return function(import,config)
     function App.new()
         local keys=App.Validate()
         local self=setmetatable({scope=Scope.new(),mode="idle",speed=1,camera=true,
-            playbackMode="time",time=0,frameIndex=1,busy=false,cancelId=0,keys=keys},App)
+            playbackMode="time",time=0,frameIndex=1,busy=false,cancelId=0,keys=keys,
+            autoClock=0,autoElapsed=0},App)
         local ok,err=xpcall(function()
         self.map=Map.new()
         self.scope:Add(RS.PostSimulation:Connect(function(dt)
@@ -118,7 +119,8 @@ return function(import,config)
             if not self.busy then
                 self:Stop()
                 if self.character then self.character:Destroy(); self.character=nil end
-                print("[TomatoTAS] Character changed. Prepare again before continuing.")
+                self:Notify(if self.map.clone then "Character changed. Respawn in the sandbox before continuing."
+                    else "Waiting for your character to enter the map; preparation is automatic.")
             end
         end))
         self.scope:Add(UIS.InputBegan:Connect(function(input,processed)
@@ -127,6 +129,9 @@ return function(import,config)
             if action=="Stop" or action=="Unload" then self:Dispatch(action); return end
             if action and not self.busy then task.spawn(function() self:Dispatch(action) end) end
         end))
+        self.scope:Add(RS.Heartbeat:Connect(function(dt)
+            self:Guard(function() self:AutoPrepare(dt) end)
+        end))
         end,debug.traceback)
         if not ok then
             self.scope:Destroy()
@@ -134,6 +139,44 @@ return function(import,config)
             error(err,0)
         end
         return self
+    end
+    function App:AutoPrepare(dt)
+        self.autoClock+=dt
+        self.autoElapsed+=dt
+        if self.autoElapsed<0.25 then return end
+        self.autoElapsed=0
+        if not self.autoEnabled or config.AutoPrepare==false or self.scope.dead or self.busy or self.mode~="idle" or self.map.clone then return end
+        local live,character=self.map:AutoCandidate()
+        if not live then return end
+        if self.autoSuppressedMap==live and self.autoSuppressedCharacter==character then return end
+        if self.map.live==live and self.character and self.character.model==character and not self:ReadyReason(true) then return end
+        if self.autoLastMap==live and self.autoLastCharacter==character and self.autoClock<(self.autoRetryAt or 0) then return end
+        if self.autoLastMap~=live or self.autoLastCharacter~=character then self.autoWarned=false end
+        self.autoLastMap,self.autoLastCharacter=live,character
+        self.autoTargetMap,self.autoTargetCharacter=live,character
+        self.busy=true
+        local token=self.cancelId
+        task.spawn(function()
+            local ok,err=xpcall(function()
+                assert(not self.scope.dead and token==self.cancelId,"Automatic preparation cancelled")
+                self:Notify("Preparing map automatically: waiting for the spawn to settle.")
+                self:Prepare(true)
+            end,debug.traceback)
+            if not ok and not self.scope.dead and token==self.cancelId then
+                self:Stop()
+                if not self.autoWarned then
+                    self:Notify("Automatic preparation will retry: "..tostring(err),"warning")
+                    self.autoWarned=true
+                end
+                self.autoRetryAt=self.autoClock+5
+            end
+            self.autoTargetMap,self.autoTargetCharacter=nil,nil
+            self.busy=false
+        end)
+    end
+    function App:StartAutoPrepare()
+        -- The loader enables this only after releasing the previous session.
+        self.autoEnabled=true
     end
     function App:Guard(fn)
         if self.scope.dead then return end
@@ -157,6 +200,10 @@ return function(import,config)
         return ok
     end
     function App:Cancel()
+        -- Do not immediately restart the automatic operation the user just stopped.
+        if self.autoTargetMap then
+            self.autoSuppressedMap,self.autoSuppressedCharacter=self.autoTargetMap,self.autoTargetCharacter
+        end
         self.cancelId+=1
         self.map.generation+=1
         self:Stop()
@@ -179,7 +226,7 @@ return function(import,config)
             return if self.map.clone then "The sandbox is already prepared." else nil
         end
         local hasRun=self.tree and #self.tree.nodes>0
-        if action~="Record" and not hasRun then return "No run yet. Prepare with F1 and record with F2, or load with F7." end
+        if action~="Record" and not hasRun then return "No run yet. Enter a map and record with F2, or load with F7." end
         if action=="Save" then return nil end
         -- Cycling with no alternate future is a harmless status request.
         if action=="NextBranch" and #self.tree:Branches()<2 then return "No alternate branches to cycle yet." end
@@ -188,6 +235,7 @@ return function(import,config)
         if action=="Record" and self.mode=="playing" then return "Pause playback before recording a branch." end
         if action=="Record" and self.mode~="recording" then return self:RecordReason() end
         if action=="Step" and self.mode~="paused" then return "Pause before advancing one physics frame." end
+        if action=="Step" then return self:RecordReason() end
         if action=="Restore" and not self.tree.marks.quick then return "No quick character mark. Save one with F4 first." end
         return nil
     end
@@ -214,29 +262,34 @@ return function(import,config)
         end
         self.character=nextCharacter
     end
-    function App:Prepare()
-        self:Stop()
+    function App:Prepare(automatic)
         assert(not self.map.clone,"Destroy/reload the tool before changing maps from a sandbox")
-        self.map:Acquire()
-        self:Attach(Players.LocalPlayer.Character)
+        if not automatic then self.autoSuppressedMap,self.autoSuppressedCharacter=nil,nil end
+        self:Stop()
+        local _,character=self.map:Acquire()
+        assert(character==Players.LocalPlayer.Character,"Character changed after map preparation; retry Prepare.")
+        self:Attach(character)
         self:Notify("Prepared "..self.map.name..". Ready to record.")
     end
     function App:PrepareClone()
+        assert(not self.map.clone,"The sandbox is already prepared")
         self:Stop()
-        if not self.map.live then self:Prepare() end
+        if not self.map.live or self.map:ReadyReason() then self:Prepare() end
         local ok,err=xpcall(function()
             self.map:Clone()
             self:Attach(self.map:Respawn())
+            self.map:CommitSandbox()
         end,debug.traceback)
         if not ok then
             self.map:Destroy()
+            if self.character then self.character:Destroy(); self.character=nil end
             if not self.scope.dead then self.map=Map.new() end
             error(err)
         end
-        self:Notify("Static sandbox ready. Server-driven mechanics and full world rewind are not implemented.","warning")
+        self:Notify("Sandbox ready. Original map removed locally; incoming maps are removed while recording.")
     end
     function App:ReadyReason(ignoreRun)
-        if not self.character or not self.character:Valid() or not self.map.origin then return "Prepare a map and living character first." end
+        if not self.character or not self.character:Valid() or not self.map.origin then return "Waiting for automatic map preparation. Enter the map, or press F1 to retry." end
         local model=self.map.clone or self.map.live
         if not model or not model.Parent then return "Prepared map was removed. Prepare the current map first." end
         if self.map.ReadyReason then
@@ -257,7 +310,16 @@ return function(import,config)
         self:Ready(true)
         -- Capture and validate frame zero before replacing a recoverable recording.
         local tree=Tree.new({map=self.map.name,spawn=self.map.spawnName,author=Players.LocalPlayer.Name,created=os.time()})
-        tree:Append(self.character:Capture(0,self.map.origin))
+        local first
+        if self.current and (self.mode=="paused" or self.mode=="playing" or self.mode=="stepPending") then
+            -- Puppet takeover changes AutoRotate and animation speeds. Preserve
+            -- the held sample's original movement state when starting a new run.
+            first=table.clone(self.current)
+            first.time=0
+        else
+            first=self.character:Capture(0,self.map.origin)
+        end
+        tree:Append(first)
         self:Stop()
         self.tree=tree
         self.time=0; self.path=nil; self.current=nil
@@ -280,6 +342,7 @@ return function(import,config)
         if not self.tree or #self.tree.nodes==0 then self:NewRun() end
         self.time=self.tree.nodes[self.tree.cursor].frame.time
         self.character:Resume(self.tree.nodes[self.tree.cursor].frame,self.map.origin)
+        self.map:SetRecording(true)
         self.current=nil; self.path=nil
         self.mode="recording"
         self:Notify("Recording from node "..self.tree.cursor..".")
@@ -287,6 +350,7 @@ return function(import,config)
     function App:Pause()
         self:Ready()
         assert(self.tree and self.tree.cursor>0,"No recorded frames")
+        self.map:SetRecording(false)
         self.mode="paused"
         -- Use an exact stored frame when pausing; never branch from an interpolated pose.
         self.current=self.tree.nodes[self.tree.cursor].frame
@@ -311,6 +375,7 @@ return function(import,config)
         self.playbackMode=mode or self.playbackMode
         self.tree.cursor=self.path[self.frameIndex]
         self.current=self.tree.nodes[self.path[self.frameIndex]].frame
+        self.map:SetRecording(false)
         self.character:Apply(self.current,self.map.origin,self.camera)
         self.mode="playing"
     end
@@ -374,6 +439,7 @@ return function(import,config)
     end
     function App:Stop()
         self.mode="idle"; self.current=nil; self.path=nil
+        self.map:SetRecording(false)
         if self.character then
             local ok,err=pcall(function() self.character:Release() end)
             if not ok then warn("[TomatoTAS] Character cleanup: "..tostring(err)) end
